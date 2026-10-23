@@ -410,71 +410,80 @@ app.get('/api/conversations/:user_id', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-// ===== TELEGRAM BOT WEBHOOK =====
-const { Telegraf } = require('telegraf');
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-const pendingVerifications = new Map();
+// ===== TELEGRAM: Проверка кода (с защитой от brute-force) =====
+const codeAttempts = new Map(); // telegram_id -> { count, lastAttempt }
 
-bot.start(async (ctx) => {
-    const chatId = ctx.chat.id;
-    const payload = ctx.startPayload;
-    if (!payload) {
-        await ctx.reply("👋 Привет! Чтобы получить код, нажмите кнопку 'Получить код в Telegram' в приложении TradeTJ.");
-        return;
-    }
-    const expectedPhone = payload.replace(/\D/g, '');
-    pendingVerifications.set(chatId, expectedPhone);
-    await ctx.reply(
-        `👋 Привет! Чтобы получить код для входа в TradeTJ, нажмите кнопку ниже.\n\nМы ожидаем номер: +${expectedPhone}`,
-        {
-            reply_markup: {
-                keyboard: [[{ text: "📱 Поделиться номером телефона", request_contact: true }]],
-                resize_keyboard: true,
-                one_time_keyboard: true
-            }
+app.post('/api/verify-telegram-code', async (req, res) => {
+    try {
+        const { phone, code } = req.body;
+        if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
+        
+        // Находим привязку Telegram ID
+        const { data: binding, error: bindingError } = await supabase
+            .from('telegram_bindings')
+            .select('telegram_id')
+            .eq('phone', phone)
+            .single();
+        
+        if (bindingError || !binding) {
+            return res.status(400).json({ error: 'Номер не привязан к Telegram.' });
         }
-    );
-});
-
-bot.on('contact', async (ctx) => {
-    const chatId = ctx.chat.id;
-    const contact = ctx.message.contact;
-    if (!contact || !contact.phone_number) {
-        await ctx.reply("⚠️ Пожалуйста, поделитесь номером телефона через кнопку.");
-        return;
-    }
-    const sharedPhone = contact.phone_number.replace(/\D/g, '');
-    const expectedPhone = pendingVerifications.get(chatId);
-    if (!expectedPhone) {
-        await ctx.reply("⚠️ Пожалуйста, сначала используйте ссылку из приложения TradeTJ.");
-        return;
-    }
-    const isMatch = sharedPhone.endsWith(expectedPhone.slice(-10)) || sharedPhone === expectedPhone;
-    if (isMatch) {
-        const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6 цифр
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
         
-        await supabase.from('telegram_bindings').upsert(
-            { telegram_id: chatId, phone: `+${sharedPhone}` },
-            { onConflict: 'phone' }
-        );
-        await supabase.from('telegram_codes').insert({
-            telegram_id: chatId,
-            code: code,
-            expires_at: expiresAt
-        });
-        pendingVerifications.delete(chatId);
+        // Rate limiting: максимум 5 попыток за 10 минут
+        const attempts = codeAttempts.get(binding.telegram_id) || { count: 0, lastAttempt: 0 };
+        const now = Date.now();
         
-        await ctx.reply(
-            `✅ Ваш код для входа в TradeTJ: *${code}*\n\nВведите его в приложении. Код действителен 10 минут.`,
-            { parse_mode: 'Markdown' }
-        );
-    } else {
-        await ctx.reply(`❌ Номер не совпадает.\nОжидался: +${expectedPhone}\nПолучен: +${sharedPhone}\n\nПожалуйста, начните процесс заново через приложение.`);
-        pendingVerifications.delete(chatId);
+        if (now - attempts.lastAttempt < 10 * 60 * 1000 && attempts.count >= 5) {
+            return res.status(429).json({ 
+                error: 'Слишком много попыток. Попробуйте через 10 минут или запросите новый код.' 
+            });
+        }
+        
+        // Находим код
+        const { data: codes, error: codeError } = await supabase
+            .from('telegram_codes')
+            .select('*')
+            .eq('telegram_id', binding.telegram_id)
+            .eq('code', code)
+            .eq('used', false)
+            .gte('expires_at', new Date().toISOString())
+            .order('created_at', { ascending: false })
+            .limit(1);
+        
+        if (codeError || !codes || codes.length === 0) {
+            // Увеличиваем счётчик неудачных попыток
+            attempts.count++;
+            attempts.lastAttempt = now;
+            codeAttempts.set(binding.telegram_id, attempts);
+            return res.status(400).json({ error: 'Неверный или истёкший код' });
+        }
+        
+        const storedCode = codes[0];
+        
+        // Находим или создаём пользователя
+        const { data: existingUser } = await supabase.from('users').select('*').eq('phone', phone).single();
+        let user;
+        if (!existingUser) {
+            const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
+            user = newUser;
+        } else {
+            user = existingUser;
+        }
+        
+        // Помечаем код как использованный
+        await supabase.from('telegram_codes').update({ used: true }).eq('id', storedCode.id);
+        
+        // Сбрасываем счётчик попыток
+        codeAttempts.delete(binding.telegram_id);
+        
+        // Удаляем все остальные неиспользованные коды для этого пользователя
+        await supabase.from('telegram_codes').delete()
+            .eq('telegram_id', binding.telegram_id)
+            .eq('used', false);
+        
+        res.json({ success: true, user: { id: user.id, phone: user.phone } });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
     }
 });
-
-// Подключаем вебхук к нашему основному Express приложению
-app.use(bot.webhookCallback(`/webhook/${process.env.TELEGRAM_BOT_TOKEN}`));
 app.listen(PORT, () => console.log(`🚀 Сервер на порту ${PORT}`));
