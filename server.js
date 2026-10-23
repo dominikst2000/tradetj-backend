@@ -1,489 +1,367 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const axios = require('axios');
 const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
+const { Telegraf } = require('telegraf');
 
 const app = express();
+
+// ===== НАСТРОЙКИ =====
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// ===== SMS: Отправка =====
-app.post('/api/send-sms', async (req, res) => {
-    try {
-        const { phone } = req.body;
-        if (!phone) return res.status(400).json({ error: 'Номер обязателен' });
+// Папка для загрузок
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
-        // Удаляем старые коды
-        await supabase.from('sms_codes').delete().eq('phone', phone);
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname);
+    cb(null, Date.now() + '-' + Math.round(Math.random() * 1E9) + ext);
+  }
+});
+const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
 
-        const smsCode = Math.floor(1000 + Math.random() * 9000).toString();
-        const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+// Статика для загруженных файлов
+app.use('/uploads', express.static(UPLOAD_DIR));
 
-        const { error: dbError } = await supabase
-            .from('sms_codes')
-            .insert([{ phone, code: smsCode, expires_at: expiresAt }]);
+// ===== TELEGRAM BOT =====
+const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+const pendingVerifications = new Map();
+const failedAttempts = new Map();
 
-        if (dbError) return res.status(500).json({ error: 'Ошибка БД: ' + dbError.message });
-
-        const cleanPhone = phone.replace('+', '');
-        const message = `Vash kod TradeTJ: ${smsCode}`;
-        const smsRuUrl = `https://sms.ru/sms/send?api_id=${process.env.SMS_RU_API_ID}&to=${cleanPhone}&msg=${encodeURIComponent(message)}&json=1`;
-
-        try {
-            const response = await axios.get(smsRuUrl);
-            console.log(`✅ SMS на ${phone}, код: ${smsCode}`);
-        } catch (smsErr) {
-            console.log(`⚠️ SMS не отправлено, но код сгенерирован: ${smsCode}`);
-        }
-
-        res.json({ success: true, test_code: smsCode });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+bot.start(async (ctx) => {
+  const chatId = ctx.chat.id;
+  const payload = ctx.startPayload;
+  if (!payload) {
+    await ctx.reply("👋 Привет! Чтобы получить код, нажмите кнопку 'Получить код в Telegram' в приложении TradeTJ.");
+    return;
+  }
+  const expectedPhone = payload.replace(/\D/g, '');
+  if (expectedPhone.length < 10) {
+    await ctx.reply("❌ Неверный формат номера.");
+    return;
+  }
+  pendingVerifications.set(chatId, expectedPhone);
+  await ctx.reply(
+    `👋 Привет! Чтобы получить код для входа в TradeTJ, нажмите кнопку ниже.\n\nМы ожидаем номер: +${expectedPhone}`,
+    {
+      reply_markup: {
+        keyboard: [[{ text: "📱 Поделиться номером телефона", request_contact: true }]],
+        resize_keyboard: true,
+        one_time_keyboard: true
+      }
     }
+  );
+});
+
+bot.on('contact', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const contact = ctx.message.contact;
+  if (!contact || !contact.phone_number) {
+    await ctx.reply("⚠️ Пожалуйста, поделитесь номером телефона через кнопку.");
+    return;
+  }
+  const sharedPhone = contact.phone_number.replace(/\D/g, '');
+  const expectedPhone = pendingVerifications.get(chatId);
+  if (!expectedPhone) {
+    await ctx.reply("️ Пожалуйста, сначала используйте ссылку из приложения TradeTJ.");
+    return;
+  }
+  const isMatch = sharedPhone.endsWith(expectedPhone.slice(-10)) || sharedPhone === expectedPhone;
+  if (isMatch) {
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    await supabase.from('telegram_bindings').upsert(
+      { telegram_id: chatId, phone: `+${sharedPhone}` },
+      { onConflict: 'phone' }
+    );
+    await supabase.from('telegram_codes').insert({
+      telegram_id: chatId,
+      code: code,
+      expires_at: expiresAt
+    });
+    pendingVerifications.delete(chatId);
+    await ctx.reply(
+      `✅ Ваш код для входа в TradeTJ: *${code}*\n\nВведите его в приложении. Код действителен 10 минут.`,
+      { parse_mode: 'Markdown' }
+    );
+  } else {
+    pendingVerifications.delete(chatId);
+    await ctx.reply(
+      `❌ Номер не совпадает.\nОжидался: +${expectedPhone}\nПолучен: +${sharedPhone}\n\nПожалуйста, начните процесс заново через приложение.`
+    );
+  }
+});
+
+// ===== SMS: Отправка кода =====
+app.post('/api/send-sms', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    await supabase.from('sms_codes').insert({
+      phone: phone,
+      code: code,
+      expires_at: expiresAt
+    });
+    console.log(`📱 SMS код для ${phone}: ${code}`);
+    res.json({ success: true, testCode: code });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ===== SMS: Проверка кода =====
 app.post('/api/verify-code', async (req, res) => {
-    try {
-        const { phone, code } = req.body;
-        if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
-
-        const { data: codes } = await supabase
-            .from('sms_codes')
-            .select('*')
-            .eq('phone', phone)
-            .gte('expires_at', new Date().toISOString())
-            .order('created_at', { ascending: false })
-            .limit(1);
-
-        if (!codes || codes.length === 0) {
-            return res.status(400).json({ error: 'Код не найден или истек. Запросите новый.' });
-        }
-
-        const storedCode = codes[0];
-        if (storedCode.code !== code) {
-            return res.status(400).json({ error: 'Неверный код' });
-        }
-
-        const { data: existingUser } = await supabase.from('users').select('*').eq('phone', phone).single();
-        let user;
-        if (!existingUser) {
-            const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
-            user = newUser;
-        } else {
-            user = existingUser;
-        }
-
-        await supabase.from('sms_codes').delete().eq('id', storedCode.id);
-        res.json({ success: true, user: { id: user.id, phone: user.phone } });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+  try {
+    const { phone, code } = req.body;
+    if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
+    const { data: codes, error: codeError } = await supabase
+      .from('sms_codes')
+      .select('*')
+      .eq('phone', phone)
+      .eq('code', code)
+      .eq('used', false)
+      .gte('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (codeError || !codes || codes.length === 0) {
+      return res.status(400).json({ error: 'Неверный или истёкший код' });
     }
+    const storedCode = codes[0];
+    let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
+    if (!user) {
+      const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
+      user = newUser;
+    }
+    await supabase.from('sms_codes').update({ used: true }).eq('id', storedCode.id);
+    res.json({ success: true, user: { id: user.id, phone: user.phone } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// ===== TELEGRAM: Проверка кода =====
+// ===== TELEGRAM: Проверка кода (с защитой от brute-force) =====
 app.post('/api/verify-telegram-code', async (req, res) => {
-    try {
-        const { phone, code } = req.body;
-        if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
-
-        // Находим привязку Telegram ID к номеру телефона
-        const { data: binding, error: bindingError } = await supabase
-            .from('telegram_bindings')
-            .select('telegram_id')
-            .eq('phone', phone)
-            .single();
-
-        if (bindingError || !binding) {
-            return res.status(400).json({ error: 'Номер не привязан к Telegram. Сначала получите код через бота.' });
-        }
-
-        // Находим код для этого Telegram ID
-        const { data: codes, error: codeError } = await supabase
-            .from('telegram_codes')
-            .select('*')
-            .eq('telegram_id', binding.telegram_id)
-            .eq('code', code)
-            .eq('used', false)
-            .gte('expires_at', new Date().toISOString())
-            .order('created_at', { ascending: false })
-            .limit(1);
-
-        if (codeError || !codes || codes.length === 0) {
-            return res.status(400).json({ error: 'Неверный или истёкший код' });
-        }
-
-        const storedCode = codes[0];
-
-        // Находим или создаём пользователя
-        const { data: existingUser } = await supabase.from('users').select('*').eq('phone', phone).single();
-        let user;
-        if (!existingUser) {
-            const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
-            user = newUser;
-        } else {
-            user = existingUser;
-        }
-
-        // Помечаем код как использованный
-        await supabase.from('telegram_codes').update({ used: true }).eq('id', storedCode.id);
-
-        res.json({ success: true, user: { id: user.id, phone: user.phone } });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
+  try {
+    const { phone, code } = req.body;
+    if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
+    const { data: binding, error: bindingError } = await supabase
+      .from('telegram_bindings')
+      .select('telegram_id')
+      .eq('phone', phone)
+      .single();
+    if (bindingError || !binding) {
+      return res.status(400).json({ error: 'Номер не привязан к Telegram. Сначала получите код через бота.' });
     }
+    const attempts = failedAttempts.get(binding.telegram_id) || { count: 0, lastAttempt: 0 };
+    const now = Date.now();
+    if (now - attempts.lastAttempt < 10 * 60 * 1000 && attempts.count >= 5) {
+      return res.status(429).json({ error: 'Слишком много попыток. Попробуйте через 10 минут или запросите новый код.' });
+    }
+    const { data: codes, error: codeError } = await supabase
+      .from('telegram_codes')
+      .select('*')
+      .eq('telegram_id', binding.telegram_id)
+      .eq('code', code)
+      .eq('used', false)
+      .gte('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (codeError || !codes || codes.length === 0) {
+      attempts.count++;
+      attempts.lastAttempt = now;
+      failedAttempts.set(binding.telegram_id, attempts);
+      return res.status(400).json({ error: 'Неверный или истёкший код' });
+    }
+    const storedCode = codes[0];
+    let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
+    if (!user) {
+      const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
+      user = newUser;
+    }
+    await supabase.from('telegram_codes').update({ used: true }).eq('id', storedCode.id);
+    await supabase.from('telegram_codes').delete()
+      .eq('telegram_id', binding.telegram_id)
+      .eq('used', false);
+    failedAttempts.delete(binding.telegram_id);
+    res.json({ success: true, user: { id: user.id, phone: user.phone } });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// ===== Объявления: Получить список (с расширенными фильтрами) =====
+// ===== Объявления: Получить список =====
 app.get('/api/listings', async (req, res) => {
-    try {
-        const { category, search, user_id, price_from, price_to, sort, seller_type, city } = req.query;
-        
-        let query = supabase.from('listings').select('*');
-        
-        if (category) query = query.eq('category', category);
-        if (search) query = query.ilike('title', `%${search}%`);
-        if (user_id) query = query.eq('user_id', user_id);
-        
-        // ВНИМАНИЕ: Если в твоей таблице listings НЕТ колонки city, эта строка вызовет ошибку 500!
-        // Если ты добавлял колонку city в таблицу listings, раскомментируй строку ниже:
-        // if (city) query = query.eq('city', city);
-        
-        if (price_from) query = query.gte('price', parseInt(price_from, 10));
-        if (price_to) query = query.lte('price', parseInt(price_to, 10));
-        
-        if (sort === 'Дешевле') {
-            query = query.order('price', { ascending: true });
-        } else if (sort === 'Дороже') {
-            query = query.order('price', { ascending: false });
-        } else if (sort === 'По дате') {
-            query = query.order('created_at', { ascending: false });
-        } else {
-            query = query.order('created_at', { ascending: false });
-        }
-        
-        const { data: listings, error } = await query;
-
-        if (error) {
-            console.error('❌ Ошибка Supabase при получении listings:', error);
-            return res.status(500).json({ error: error.message });
-        }
-        
-        res.json(listings || []);
-    } catch (error) {
-        console.error('❌ Критическая ошибка сервера /api/listings:', error);
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    let query = supabase.from('listings').select('*');
+    if (req.query.user_id) query = query.eq('user_id', req.query.user_id);
+    if (req.query.category) query = query.eq('category', req.query.category);
+    if (req.query.search) query = query.ilike('title', `%${req.query.search}%`);
+    if (req.query.price_from) query = query.gte('price', req.query.price_from);
+    if (req.query.price_to) query = query.lte('price', req.query.price_to);
+    if (req.query.sort === 'Дешевле') query = query.order('price', { ascending: true });
+    if (req.query.sort === 'Дороже') query = query.order('price', { ascending: false });
+    if (req.query.sort === 'По дате') query = query.order('created_at', { ascending: false });
+    const { data, error } = await query.order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// ===== Объявления: Создать (с фото и координатами) =====
+// ===== Объявления: Создать =====
 app.post('/api/listings', async (req, res) => {
-    try {
-        const { user_id, title, price, description, category, image_url, images, phone, latitude, longitude } = req.body;
-        
-        const imagesArray = images && Array.isArray(images) && images.length > 0 
-            ? images 
-            : (image_url ? [image_url] : []);
-        
-        const { data, error } = await supabase
-            .from('listings')
-            .insert([{ 
-                user_id, 
-                title, 
-                price, 
-                description, 
-                category, 
-                image_url: imagesArray[0] || null,
-                images: imagesArray,
-                phone,
-                latitude: latitude || null,
-                longitude: longitude || null,
-            }])
-            .select()
-            .single();
-
-        if (error) return res.status(500).json({ error: error.message });
-        res.json(data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    const { user_id, title, price, description, category, images, image_url, phone, latitude, longitude } = req.body;
+    if (!user_id || !title || !price) return res.status(400).json({ error: 'user_id, title и price обязательны' });
+    const { data, error } = await supabase.from('listings').insert([{
+      user_id, title, price, description, category, images, image_url, phone, latitude, longitude
+    }]).select().single();
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ===== Объявления: Удалить =====
 app.delete('/api/listings/:id', async (req, res) => {
-    try {
-        const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
-        if (error) return res.status(500).json({ error: error.message });
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Загрузка файлов =====
+app.post('/api/upload', upload.single('photo'), (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
+    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    res.json({ url: fileUrl });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Избранное: Получить =====
+app.get('/api/favorites/:user_id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('favorites').select('listing_id').eq('user_id', req.params.user_id);
+    if (error) throw error;
+    res.json(data.map(f => f.listing_id));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ===== Избранное: Добавить =====
 app.post('/api/favorites', async (req, res) => {
-    try {
-        const { user_id, listing_id } = req.body;
-        const { data, error } = await supabase
-            .from('favorites')
-            .insert([{ user_id, listing_id }])
-            .select()
-            .single();
-
-        if (error) return res.status(500).json({ error: error.message });
-        res.json(data);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    const { user_id, listing_id } = req.body;
+    if (!user_id || !listing_id) return res.status(400).json({ error: 'user_id и listing_id обязательны' });
+    const { data, error } = await supabase.from('favorites').insert([{ user_id, listing_id }]).select().single();
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ===== Избранное: Удалить =====
 app.delete('/api/favorites/:user_id/:listing_id', async (req, res) => {
-    try {
-        const { error } = await supabase
-            .from('favorites')
-            .delete()
-            .eq('user_id', req.params.user_id)
-            .eq('listing_id', req.params.listing_id);
-
-        if (error) return res.status(500).json({ error: error.message });
-        res.json({ success: true });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    const { error } = await supabase.from('favorites').delete()
+      .eq('user_id', req.params.user_id)
+      .eq('listing_id', req.params.listing_id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// ===== Избранное: Получить список =====
-app.get('/api/favorites/:user_id', async (req, res) => {
-    try {
-        const { data, error } = await supabase
-            .from('favorites')
-            .select('listing_id')
-            .eq('user_id', req.params.user_id);
-
-        if (error) return res.status(500).json({ error: error.message });
-        res.json(data.map(f => f.listing_id));
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ===== Загрузка фото =====
-const upload = multer({ storage: multer.memoryStorage() });
-
-app.post('/api/upload', upload.single('photo'), async (req, res) => {
-    try {
-        if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
-
-        const fileExtension = req.file.originalname.split('.').pop() || 'jpg';
-        const fileName = `${Date.now()}.${fileExtension}`;
-        
-        const { data, error } = await supabase.storage
-            .from('listings')
-            .upload(fileName, req.file.buffer, {
-                contentType: req.file.mimetype,
-            });
-
-        if (error) return res.status(500).json({ error: error.message });
-
-        const { data: urlData } = supabase.storage
-            .from('listings')
-            .getPublicUrl(fileName);
-
-        res.json({ url: urlData.publicUrl });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-// ===== ЧАТ: Получить сообщения =====
+// ===== Сообщения: Получить =====
 app.get('/api/messages', async (req, res) => {
-    try {
-        const { user1, user2, listing_id } = req.query;
-        const { data, error } = await supabase
-            .from('messages')
-            .select('*')
-            .or(`and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`)
-            .eq('listing_id', listing_id)
-            .order('created_at', { ascending: true });
-
-        if (error) return res.status(500).json({ error: error.message });
-        res.json(data || []);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    const { user1, user2, listing_id } = req.query;
+    if (!user1 || !user2) return res.status(400).json({ error: 'user1 и user2 обязательны' });
+    let query = supabase.from('messages').select('*')
+      .or(`(sender_id.eq.${user1},receiver_id.eq.${user1})`)
+      .or(`(sender_id.eq.${user2},receiver_id.eq.${user2})`);
+    if (listing_id) query = query.eq('listing_id', listing_id);
+    const { data, error } = await query.order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// ===== ЧАТ: Отправить сообщение (текст, фото или голосовое) =====
+// ===== Сообщения: Отправить =====
 app.post('/api/messages', async (req, res) => {
-    try {
-        const { sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration } = req.body;
-        
-        const { data, error } = await supabase
-            .from('messages')
-            .insert([{ sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration }])
-            .select()
-            .single();
-
-        if (error) {
-            console.error('❌ Ошибка сохранения сообщения:', error);
-            return res.status(500).json({ error: error.message });
-        }
-        
-        res.json(data);
-    } catch (error) {
-        console.error('❌ Критическая ошибка отправки:', error);
-        res.status(500).json({ error: error.message });
-    }
+  try {
+    const { sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration } = req.body;
+    if (!sender_id || !receiver_id) return res.status(400).json({ error: 'sender_id и receiver_id обязательны' });
+    const { data, error } = await supabase.from('messages').insert([{
+      sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration
+    }]).select().single();
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
-// ===== ЧАТ: Список диалогов =====
-app.get('/api/conversations/:user_id', async (req, res) => {
-    try {
-        const userId = req.params.user_id;
-        console.log(' Запрос диалогов для пользователя:', userId);
-
-        // Шаг 1: Получаем все сообщения пользователя
-        const { data: messages, error } = await supabase
-            .from('messages')
-            .select('*')
-            .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
-            .order('created_at', { ascending: false });
-
-        if (error) {
-            console.error('❌ Ошибка запроса messages:', error);
-            return res.status(500).json({ error: error.message });
-        }
-
-        console.log('📨 Найдено сообщений:', messages?.length || 0);
-
-        if (!messages || messages.length === 0) {
-            return res.json([]);
-        }
-
-        // Шаг 2: Находим уникальные listing_id
-        const uniqueListingIds = [...new Set(messages.map(m => m.listing_id))];
-        console.log('📋 Уникальные объявления:', uniqueListingIds);
-
-        // Шаг 3: Получаем данные об этих объявлениях
-        const { data: listings, error: listingsError } = await supabase
-            .from('listings')
-            .select('id, title, image_url, price')
-            .in('id', uniqueListingIds);
-
-        if (listingsError) {
-            console.error('❌ Ошибка запроса listings:', listingsError);
-        }
-
-        // Шаг 4: Собираем результат
-        const listingsMap = {};
-        (listings || []).forEach(l => {
-            listingsMap[l.id] = l;
-        });
-
-        // Для каждого объявления берём последнее сообщение
-        const uniqueChats = {};
-        messages.forEach(msg => {
-            if (!uniqueChats[msg.listing_id]) {
-                uniqueChats[msg.listing_id] = {
-                    listing_id: msg.listing_id,
-                    listings: listingsMap[msg.listing_id] || null,
-                    content: msg.content,
-                    created_at: msg.created_at,
-                    sender_id: msg.sender_id,
-                    receiver_id: msg.receiver_id,
-                };
-            }
-        });
-
-        const result = Object.values(uniqueChats);
-        console.log('✅ Отправляем диалогов:', result.length);
-        res.json(result);
-    } catch (error) {
-        console.error('❌ Критическая ошибка conversations:', error);
-        res.status(500).json({ error: error.message });
+// ===== Диалоги: Получить список =====
+app.get('/api/conversations/:userId', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .or(`sender_id.eq.${req.params.userId},receiver_id.eq.${req.params.userId}`)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    const conversations = [];
+    const seen = new Set();
+    for (const msg of (data || [])) {
+      const key = `${msg.sender_id}-${msg.receiver_id}-${msg.listing_id}`;
+      const reverseKey = `${msg.receiver_id}-${msg.sender_id}-${msg.listing_id}`;
+      if (!seen.has(key) && !seen.has(reverseKey)) {
+        seen.add(key);
+        conversations.push(msg);
+      }
     }
+    res.json(conversations);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
+// ===== TELEGRAM WEBHOOK =====
+const webhookPath = `/webhook/${process.env.TELEGRAM_BOT_TOKEN}`;
+app.use(bot.webhookCallback(webhookPath));
+
+// ===== Тестовый роут =====
+app.get('/', (req, res) => {
+  res.send(' TradeTJ Backend & Telegram Bot are running!');
+});
+
+// ===== ЗАПУСК =====
 const PORT = process.env.PORT || 3000;
-// ===== TELEGRAM: Проверка кода (с защитой от brute-force) =====
-const codeAttempts = new Map(); // telegram_id -> { count, lastAttempt }
-
-app.post('/api/verify-telegram-code', async (req, res) => {
-    try {
-        const { phone, code } = req.body;
-        if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
-        
-        // Находим привязку Telegram ID
-        const { data: binding, error: bindingError } = await supabase
-            .from('telegram_bindings')
-            .select('telegram_id')
-            .eq('phone', phone)
-            .single();
-        
-        if (bindingError || !binding) {
-            return res.status(400).json({ error: 'Номер не привязан к Telegram.' });
-        }
-        
-        // Rate limiting: максимум 5 попыток за 10 минут
-        const attempts = codeAttempts.get(binding.telegram_id) || { count: 0, lastAttempt: 0 };
-        const now = Date.now();
-        
-        if (now - attempts.lastAttempt < 10 * 60 * 1000 && attempts.count >= 5) {
-            return res.status(429).json({ 
-                error: 'Слишком много попыток. Попробуйте через 10 минут или запросите новый код.' 
-            });
-        }
-        
-        // Находим код
-        const { data: codes, error: codeError } = await supabase
-            .from('telegram_codes')
-            .select('*')
-            .eq('telegram_id', binding.telegram_id)
-            .eq('code', code)
-            .eq('used', false)
-            .gte('expires_at', new Date().toISOString())
-            .order('created_at', { ascending: false })
-            .limit(1);
-        
-        if (codeError || !codes || codes.length === 0) {
-            // Увеличиваем счётчик неудачных попыток
-            attempts.count++;
-            attempts.lastAttempt = now;
-            codeAttempts.set(binding.telegram_id, attempts);
-            return res.status(400).json({ error: 'Неверный или истёкший код' });
-        }
-        
-        const storedCode = codes[0];
-        
-        // Находим или создаём пользователя
-        const { data: existingUser } = await supabase.from('users').select('*').eq('phone', phone).single();
-        let user;
-        if (!existingUser) {
-            const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
-            user = newUser;
-        } else {
-            user = existingUser;
-        }
-        
-        // Помечаем код как использованный
-        await supabase.from('telegram_codes').update({ used: true }).eq('id', storedCode.id);
-        
-        // Сбрасываем счётчик попыток
-        codeAttempts.delete(binding.telegram_id);
-        
-        // Удаляем все остальные неиспользованные коды для этого пользователя
-        await supabase.from('telegram_codes').delete()
-            .eq('telegram_id', binding.telegram_id)
-            .eq('used', false);
-        
-        res.json({ success: true, user: { id: user.id, phone: user.phone } });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
+app.listen(PORT, () => {
+  console.log(`🚀 Сервер запущен на порту ${PORT}`);
+  console.log(` Telegram webhook: ${webhookPath}`);
 });
-app.listen(PORT, () => console.log(`🚀 Сервер на порту ${PORT}`));
