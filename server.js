@@ -410,4 +410,71 @@ app.get('/api/conversations/:user_id', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
+// ===== TELEGRAM BOT WEBHOOK =====
+const { Telegraf } = require('telegraf');
+const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+const pendingVerifications = new Map();
+
+bot.start(async (ctx) => {
+    const chatId = ctx.chat.id;
+    const payload = ctx.startPayload;
+    if (!payload) {
+        await ctx.reply("👋 Привет! Чтобы получить код, нажмите кнопку 'Получить код в Telegram' в приложении TradeTJ.");
+        return;
+    }
+    const expectedPhone = payload.replace(/\D/g, '');
+    pendingVerifications.set(chatId, expectedPhone);
+    await ctx.reply(
+        `👋 Привет! Чтобы получить код для входа в TradeTJ, нажмите кнопку ниже.\n\nМы ожидаем номер: +${expectedPhone}`,
+        {
+            reply_markup: {
+                keyboard: [[{ text: "📱 Поделиться номером телефона", request_contact: true }]],
+                resize_keyboard: true,
+                one_time_keyboard: true
+            }
+        }
+    );
+});
+
+bot.on('contact', async (ctx) => {
+    const chatId = ctx.chat.id;
+    const contact = ctx.message.contact;
+    if (!contact || !contact.phone_number) {
+        await ctx.reply("⚠️ Пожалуйста, поделитесь номером телефона через кнопку.");
+        return;
+    }
+    const sharedPhone = contact.phone_number.replace(/\D/g, '');
+    const expectedPhone = pendingVerifications.get(chatId);
+    if (!expectedPhone) {
+        await ctx.reply("⚠️ Пожалуйста, сначала используйте ссылку из приложения TradeTJ.");
+        return;
+    }
+    const isMatch = sharedPhone.endsWith(expectedPhone.slice(-10)) || sharedPhone === expectedPhone;
+    if (isMatch) {
+        const code = Math.floor(1000 + Math.random() * 9000).toString();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+        
+        await supabase.from('telegram_bindings').upsert(
+            { telegram_id: chatId, phone: `+${sharedPhone}` },
+            { onConflict: 'phone' }
+        );
+        await supabase.from('telegram_codes').insert({
+            telegram_id: chatId,
+            code: code,
+            expires_at: expiresAt
+        });
+        pendingVerifications.delete(chatId);
+        
+        await ctx.reply(
+            `✅ Ваш код для входа в TradeTJ: *${code}*\n\nВведите его в приложении. Код действителен 10 минут.`,
+            { parse_mode: 'Markdown' }
+        );
+    } else {
+        await ctx.reply(`❌ Номер не совпадает.\nОжидался: +${expectedPhone}\nПолучен: +${sharedPhone}\n\nПожалуйста, начните процесс заново через приложение.`);
+        pendingVerifications.delete(chatId);
+    }
+});
+
+// Подключаем вебхук к нашему основному Express приложению
+app.use(bot.webhookCallback(`/webhook/${process.env.TELEGRAM_BOT_TOKEN}`));
 app.listen(PORT, () => console.log(`🚀 Сервер на порту ${PORT}`));
