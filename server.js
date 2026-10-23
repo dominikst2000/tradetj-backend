@@ -451,7 +451,7 @@ bot.on('contact', async (ctx) => {
     }
     const isMatch = sharedPhone.endsWith(expectedPhone.slice(-10)) || sharedPhone === expectedPhone;
     if (isMatch) {
-        const code = Math.floor(1000 + Math.random() * 9000).toString();
+        const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6 цифр
         const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
         
         await supabase.from('telegram_bindings').upsert(
