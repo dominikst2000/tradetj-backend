@@ -245,12 +245,35 @@ app.delete('/api/listings/:id', async (req, res) => {
   }
 });
 
-// ===== Загрузка файлов =====
-app.post('/api/upload', upload.single('photo'), (req, res) => {
+// ===== Загрузка файлов в Supabase Storage =====
+app.post('/api/upload', upload.single('photo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
-    const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-    res.json({ url: fileUrl });
+    
+    const fs = require('fs');
+    const fileBuffer = fs.readFileSync(req.file.path);
+    const fileName = `${Date.now()}-${req.file.originalname}`;
+    
+    // Загружаем файл в Supabase Storage
+    const { data, error } = await supabase.storage
+      .from('listings')
+      .upload(fileName, fileBuffer, {
+        contentType: req.file.mimetype,
+        cacheControl: '3600',
+        upsert: false
+      });
+    
+    // Удаляем временный файл с сервера
+    fs.unlinkSync(req.file.path);
+    
+    if (error) throw error;
+    
+    // Получаем публичный URL
+    const { data: { publicUrl } } = supabase.storage
+      .from('listings')
+      .getPublicUrl(fileName);
+    
+    res.json({ url: publicUrl });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
