@@ -321,18 +321,30 @@ app.get('/api/messages', async (req, res) => {
   try {
     const { user1, user2, listing_id } = req.query;
     if (!user1 || !user2) return res.status(400).json({ error: 'user1 и user2 обязательны' });
-    let query = supabase.from('messages').select('*')
-      .or(`(sender_id.eq.${user1},receiver_id.eq.${user1})`)
-      .or(`(sender_id.eq.${user2},receiver_id.eq.${user2})`);
-    if (listing_id) query = query.eq('listing_id', listing_id);
+    
+    // Используем простой .or() с правильным синтаксисом PostgREST
+    const orCondition = `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`;
+    
+    let query = supabase.from('messages').select('*').or(orCondition);
+    
+    // ВАЖНО: передаём чистый UUID, без префикса "eq."
+    if (listing_id && listing_id !== 'null' && listing_id !== 'undefined') {
+      query = query.eq('listing_id', listing_id);
+    }
+    
     const { data, error } = await query.order('created_at', { ascending: true });
-    if (error) throw error;
+    
+    if (error) {
+      console.error('Supabase error:', error);
+      return res.status(500).json({ error: error.message });
+    }
+    
     res.json(data || []);
   } catch (error) {
+    console.error('Server error:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
-
 // ===== Сообщения: Отправить =====
 app.post('/api/messages', async (req, res) => {
   try {
