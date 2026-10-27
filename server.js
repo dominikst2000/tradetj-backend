@@ -223,10 +223,12 @@ app.get('/api/listings', async (req, res) => {
 // ===== Объявления: Создать =====
 app.post('/api/listings', async (req, res) => {
   try {
-    const { user_id, title, price, description, category, images, image_url, phone, latitude, longitude } = req.body;
+    // ДОБАВИЛИ city в конце
+    const { user_id, title, price, description, category, images, image_url, phone, latitude, longitude, city } = req.body; 
     if (!user_id || !title || !price) return res.status(400).json({ error: 'user_id, title и price обязательны' });
     const { data, error } = await supabase.from('listings').insert([{
-      user_id, title, price, description, category, images, image_url, phone, latitude, longitude
+      user_id, title, price, description, category, images, image_url, phone, latitude, longitude, 
+      city // <-- ДОБАВИЛИ city сюда
     }]).select().single();
     if (error) throw error;
     res.status(201).json(data);
