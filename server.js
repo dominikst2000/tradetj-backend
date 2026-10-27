@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 const { Telegraf } = require('telegraf');
+const { GoogleGenerativeAI } = require('@google/generative-ai'); // <-- ДОБАВЛЕНО
 
 const app = express();
 
@@ -322,12 +323,10 @@ app.get('/api/messages', async (req, res) => {
     const { user1, user2, listing_id } = req.query;
     if (!user1 || !user2) return res.status(400).json({ error: 'user1 и user2 обязательны' });
     
-    // Используем простой .or() с правильным синтаксисом PostgREST
     const orCondition = `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`;
     
     let query = supabase.from('messages').select('*').or(orCondition);
     
-    // ВАЖНО: передаём чистый UUID, без префикса "eq."
     if (listing_id && listing_id !== 'null' && listing_id !== 'undefined') {
       query = query.eq('listing_id', listing_id);
     }
@@ -345,6 +344,7 @@ app.get('/api/messages', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
 // ===== Сообщения: Отправить =====
 app.post('/api/messages', async (req, res) => {
   try {
@@ -384,6 +384,54 @@ app.get('/api/conversations/:userId', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// ==========================================================
+// ===== НЕЙРОСЕТЬ (ИИ): Генерация описания ================
+// ==========================================================
+app.post('/api/ai/generate', async (req, res) => {
+  try {
+    const { title, category, price } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ error: 'Название товара обязательно' });
+    }
+
+    if (!process.env.GEMINI_API_KEY) {
+      return res.status(500).json({ error: 'API ключ нейросети не настроен на сервере' });
+    }
+
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const prompt = `
+      Ты — профессиональный копирайтер маркетплейса TradeTJ (Таджикистан).
+      Напиши продающее, но честное описание для объявления.
+      
+      Название товара: ${title}
+      Категория: ${category || 'Не указана'}
+      Цена: ${price || 'Не указана'}
+      
+      Требования:
+      1. Длина: 3-4 предложения.
+      2. Пиши от первого лица (например, "Продаю...", "Отличное состояние...").
+      3. Выдели главные преимущества (состояние, комплектация, причина продажи).
+      4. В конце добавь призыв к действию (например, "Пишите в чат", "Звоните").
+      5. Без лишних смайликов, максимум 1-2.
+      6. Пиши на русском языке.
+    `;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const text = response.text();
+
+    res.json({ text: text.trim() });
+
+  } catch (error) {
+    console.error('AI Error:', error);
+    res.status(500).json({ error: 'Не удалось сгенерировать описание. Попробуйте позже.' });
+  }
+});
+// ==========================================================
 
 // ===== TELEGRAM WEBHOOK =====
 const webhookPath = `/webhook/${process.env.TELEGRAM_BOT_TOKEN}`;
