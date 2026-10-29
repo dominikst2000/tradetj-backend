@@ -7,6 +7,7 @@ const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 const { Telegraf } = require('telegraf');
 const { GoogleGenerativeAI } = require('@google/generative-ai'); // <-- ДОБАВЛЕНО
+const ADMIN_ID = '5dac82e8-6c01-4f5e-865b-69d817a727cc'; // Твой секретный ID
 
 const app = express();
 
@@ -462,6 +463,38 @@ app.post('/api/ai/generate', async (req, res) => {
   } catch (error) {
     console.error('AI Error:', error);
     res.status(500).json({ error: 'Не удалось сгенерировать описание. Попробуйте позже.' });
+  }
+});
+
+// ===== АДМИНКА: Получить все объявления =====
+app.get('/api/admin/listings', async (req, res) => {
+  try {
+    const userId = req.query.user_id; // Приложение будет передавать свой ID
+    if (userId !== ADMIN_ID) {
+      return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
+    }
+
+    const { data, error } = await supabase.from('listings').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== АДМИНКА: Удалить любое объявление =====
+app.delete('/api/admin/listings/:id', async (req, res) => {
+  try {
+    const userId = req.query.user_id;
+    if (userId !== ADMIN_ID) {
+      return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
+    }
+
+    const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true, message: 'Объявление удалено' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 // ==========================================================
