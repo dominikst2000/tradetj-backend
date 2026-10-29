@@ -200,6 +200,37 @@ app.post('/api/verify-telegram-code', async (req, res) => {
   }
 });
 
+// ===== Пользователь: Получить данные (для аватарки) =====
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('users').select('*').eq('id', req.params.id).single();
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Пользователь: Обновить аватарку =====
+app.put('/api/users/:userId/avatar', async (req, res) => {
+  try {
+    const { avatar_url } = req.body;
+    if (!avatar_url) return res.status(400).json({ error: 'avatar_url обязателен' });
+    
+    const { data, error } = await supabase
+      .from('users')
+      .update({ avatar_url })
+      .eq('id', req.params.userId)
+      .select()
+      .single();
+      
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Объявления: Получить список =====
 app.get('/api/listings', async (req, res) => {
   try {
