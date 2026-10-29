@@ -499,6 +499,43 @@ app.delete('/api/admin/listings/:id', async (req, res) => {
 });
 // ==========================================================
 
+// ===== АДМИНКА: Получить всех пользователей =====
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const userId = req.query.user_id;
+    if (userId !== ADMIN_ID) {
+      return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
+    }
+
+    const { data, error } = await supabase.from('users').select('*').order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== АДМИНКА: Удалить пользователя =====
+app.delete('/api/admin/users/:id', async (req, res) => {
+  try {
+    const userId = req.query.user_id;
+    if (userId !== ADMIN_ID) {
+      return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
+    }
+
+    if (req.params.id === ADMIN_ID) {
+      return res.status(400).json({ error: 'Вы не можете удалить самого себя!' });
+    }
+
+    // Удаляем пользователя (объявления и сообщения удалятся каскадно, если настроено в базе)
+    const { error } = await supabase.from('users').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true, message: 'Пользователь удален' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== TELEGRAM WEBHOOK =====
 const webhookPath = `/webhook/${process.env.TELEGRAM_BOT_TOKEN}`;
 app.use(bot.webhookCallback(webhookPath));
