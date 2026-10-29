@@ -258,9 +258,17 @@ app.post('/api/listings', async (req, res) => {
     // ДОБАВИЛИ city в конце
     const { user_id, title, price, description, category, images, image_url, phone, latitude, longitude, city } = req.body; 
     if (!user_id || !title || !price) return res.status(400).json({ error: 'user_id, title и price обязательны' });
+
+    // ===== ВОТ ЭТИ 3 СТРОЧКИ НУЖНО ДОБАВИТЬ =====
+    const { data: user } = await supabase.from('users').select('is_blocked').eq('id', user_id).single();
+    if (user && user.is_blocked) {
+      return res.status(403).json({ error: 'Ваш аккаунт заблокирован. Свяжитесь с поддержкой.' });
+    }
+    // =============================================
+
     const { data, error } = await supabase.from('listings').insert([{
       user_id, title, price, description, category, images, image_url, phone, latitude, longitude, 
-      city // <-- ДОБАВИЛИ city сюда
+      city 
     }]).select().single();
     if (error) throw error;
     res.status(201).json(data);
@@ -268,7 +276,6 @@ app.post('/api/listings', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 // ===== Объявления: Удалить =====
 app.delete('/api/listings/:id', async (req, res) => {
   try {
@@ -531,6 +538,34 @@ app.delete('/api/admin/users/:id', async (req, res) => {
     const { error } = await supabase.from('users').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true, message: 'Пользователь удален' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== АДМИНКА: Изменить статус пользователя (предупредить/забанить) =====
+app.put('/api/admin/users/:id/status', async (req, res) => {
+  try {
+    const adminId = req.query.user_id;
+    if (adminId !== ADMIN_ID) return res.status(403).json({ error: 'Доступ запрещен' });
+
+    const { action } = req.body; // 'warn', 'block' или 'unblock'
+    const userId = req.params.id;
+
+    if (userId === ADMIN_ID) return res.status(400).json({ error: 'Вы не можете забанить себя!' });
+
+    if (action === 'block') {
+      await supabase.from('users').update({ is_blocked: true }).eq('id', userId);
+    } else if (action === 'unblock') {
+      await supabase.from('users').update({ is_blocked: false }).eq('id', userId);
+    } else if (action === 'warn') {
+      // Получаем текущее количество и прибавляем 1
+      const { data: user } = await supabase.from('users').select('warnings').eq('id', userId).single();
+      const currentWarnings = user?.warnings || 0;
+      await supabase.from('users').update({ warnings: currentWarnings + 1 }).eq('id', userId);
+    }
+
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
