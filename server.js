@@ -361,6 +361,10 @@ app.delete('/api/favorites/:user_id/:listing_id', async (req, res) => {
 // ===== Сообщения: Получить =====
 app.get('/api/messages', async (req, res) => {
   try {
+        // Обновляем время последнего визита
+    if (user1) {
+      await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', user1);
+    }
     const { user1, user2, listing_id } = req.query;
     if (!user1 || !user2) return res.status(400).json({ error: 'user1 и user2 обязательны' });
     
@@ -566,6 +570,17 @@ app.put('/api/admin/users/:id/status', async (req, res) => {
     }
 
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Пользователь: Получить статус онлайн =====
+app.get('/api/users/:id/status', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('users').select('last_seen').eq('id', req.params.id).single();
+    if (error) throw error;
+    res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
