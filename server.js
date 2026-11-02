@@ -361,17 +361,18 @@ app.delete('/api/favorites/:user_id/:listing_id', async (req, res) => {
 // ===== Сообщения: Получить =====
 app.get('/api/messages', async (req, res) => {
   try {
-        // Обновляем время последнего визита
-    if (user1) {
-      await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', user1);
-    }
+    // Сначала получаем параметры из запроса
     const { user1, user2, listing_id } = req.query;
     if (!user1 || !user2) return res.status(400).json({ error: 'user1 и user2 обязательны' });
-    
+
+    // Теперь обновляем время последнего визита (user1 уже существует)
+    await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', user1);
+
     const orCondition = `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`;
     
     let query = supabase.from('messages').select('*').or(orCondition);
     
+    // Оставляем фильтр по listing_id (или убираем, если хочешь, чтобы чат был общим)
     if (listing_id && listing_id !== 'null' && listing_id !== 'undefined') {
       query = query.eq('listing_id', listing_id);
     }
