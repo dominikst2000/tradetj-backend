@@ -232,6 +232,26 @@ app.put('/api/users/:userId/avatar', async (req, res) => {
   }
 });
 
+// ===== Пользователь: Обновить имя =====
+app.put('/api/users/:userId/name', async (req, res) => {
+  try {
+    const { name } = req.body;
+    if (!name || name.trim().isEmpty) return res.status(400).json({ error: 'Имя обязательно' });
+    
+    const { data, error } = await supabase
+      .from('users')
+      .update({ name: name.trim() })
+      .eq('id', req.params.userId)
+      .select()
+      .single();
+      
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Объявления: Получить список =====
 app.get('/api/listings', async (req, res) => {
   try {
