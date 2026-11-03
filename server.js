@@ -312,6 +312,35 @@ app.delete('/api/listings/:id', async (req, res) => {
   }
 });
 
+// ===== Объявления: Редактировать =====
+app.put('/api/listings/:id', async (req, res) => {
+  try {
+    const { title, price, description, category, images, image_url, city } = req.body;
+    
+    // Собираем объект только с теми полями, которые пришли
+    const updateData = {};
+    if (title) updateData.title = title;
+    if (price) updateData.price = price;
+    if (description) updateData.description = description;
+    if (category) updateData.category = category;
+    if (images) updateData.images = images;
+    if (image_url) updateData.image_url = image_url;
+    if (city) updateData.city = city;
+
+    const { data, error } = await supabase
+      .from('listings')
+      .update(updateData)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+      
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Объявления: Изменить статус (Продано/Активно) =====
 app.put('/api/listings/:id/status', async (req, res) => {
   try {
