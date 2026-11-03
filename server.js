@@ -658,6 +658,70 @@ app.get('/api/users/:id/status', async (req, res) => {
   }
 });
 
+// ===== Отзывы: Получить для продавца =====
+app.get('/api/reviews/:sellerId', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('reviews')
+      .select('*, users!reviews_reviewer_id_fkey(phone, name, avatar_url)')
+      .eq('seller_id', req.params.sellerId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Отзывы: Оставить =====
+app.post('/api/reviews', async (req, res) => {
+  try {
+    const { seller_id, reviewer_id, rating, comment } = req.body;
+    if (!seller_id || !reviewer_id || !rating) {
+      return res.status(400).json({ error: 'Заполните все поля' });
+    }
+    if (seller_id === reviewer_id) {
+      return res.status(400).json({ error: 'Нельзя оставить отзыв самому себе' });
+    }
+    // Проверяем, не оставлял ли уже этот пользователь отзыв
+    const { data: existing } = await supabase
+      .from('reviews')
+      .select('id')
+      .eq('seller_id', seller_id)
+      .eq('reviewer_id', reviewer_id);
+    if (existing && existing.length > 0) {
+      return res.status(400).json({ error: 'Вы уже оставили отзыв этому продавцу' });
+    }
+    const { data, error } = await supabase
+      .from('reviews')
+      .insert([{ seller_id, reviewer_id, rating, comment }])
+      .select()
+      .single();
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Отзывы: Средний рейтинг =====
+app.get('/api/users/:id/rating', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('reviews')
+      .select('rating')
+      .eq('seller_id', req.params.id);
+    if (error) throw error;
+    if (!data || data.length === 0) {
+      return res.json({ average: 0, count: 0 });
+    }
+    const average = data.reduce((sum, r) => sum + r.rating, 0) / data.length;
+    res.json({ average: Math.round(average * 10) / 10, count: data.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== TELEGRAM WEBHOOK =====
 const webhookPath = `/webhook/${process.env.TELEGRAM_BOT_TOKEN}`;
 app.use(bot.webhookCallback(webhookPath));
