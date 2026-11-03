@@ -256,7 +256,12 @@ app.put('/api/users/:userId/name', async (req, res) => {
 app.get('/api/listings', async (req, res) => {
   try {
     let query = supabase.from('listings').select('*');
-    if (req.query.user_id) query = query.eq('user_id', req.query.user_id);
+    if (req.query.user_id) {
+  query = query.eq('user_id', req.query.user_id);
+} else {
+  // Если это не запрос профиля конкретного пользователя, показываем только непроданные
+  query = query.eq('is_sold', false);
+}
     if (req.query.category) query = query.eq('category', req.query.category);
     if (req.query.search) query = query.ilike('title', `%${req.query.search}%`);
     if (req.query.price_from) query = query.gte('price', req.query.price_from);
@@ -302,6 +307,23 @@ app.delete('/api/listings/:id', async (req, res) => {
     const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Объявления: Изменить статус (Продано/Активно) =====
+app.put('/api/listings/:id/status', async (req, res) => {
+  try {
+    const { is_sold } = req.body;
+    const { data, error } = await supabase
+      .from('listings')
+      .update({ is_sold })
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
