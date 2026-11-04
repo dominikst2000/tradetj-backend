@@ -204,6 +204,9 @@ app.post('/api/verify-telegram-code', async (req, res) => {
 // ===== Пользователь: Получить данные (для аватарки) =====
 app.get('/api/users/:id', async (req, res) => {
   try {
+    // Обновляем время последнего визита (если это твой профиль)
+    await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', req.params.id);
+    
     const { data, error } = await supabase.from('users').select('*').eq('id', req.params.id).single();
     if (error) throw error;
     res.json(data);
@@ -211,7 +214,6 @@ app.get('/api/users/:id', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 // ===== Пользователь: Обновить аватарку =====
 app.put('/api/users/:userId/avatar', async (req, res) => {
   try {
