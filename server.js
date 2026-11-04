@@ -722,6 +722,59 @@ app.get('/api/users/:id/rating', async (req, res) => {
   }
 });
 
+// ===== Жалобы: Оставить =====
+app.post('/api/reports', async (req, res) => {
+  try {
+    const { listing_id, reporter_id, reason } = req.body;
+    if (!listing_id || !reporter_id || !reason) {
+      return res.status(400).json({ error: 'Заполните все поля' });
+    }
+
+    // Проверяем, не жаловался ли уже этот пользователь на это объявление
+    const { data: existing } = await supabase
+      .from('reports')
+      .select('id')
+      .eq('listing_id', listing_id)
+      .eq('reporter_id', reporter_id);
+
+    if (existing && existing.length > 0) {
+      return res.status(400).json({ error: 'Вы уже жаловались на это объявление' });
+    }
+
+    const { data, error } = await supabase
+      .from('reports')
+      .insert([{ listing_id, reporter_id, reason }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== АДМИНКА: Получить все жалобы =====
+app.get('/api/admin/reports', async (req, res) => {
+  try {
+    const userId = req.query.user_id;
+    if (userId !== ADMIN_ID) {
+      return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
+    }
+
+    // Получаем жалобы вместе с данными объявления
+    const { data, error } = await supabase
+      .from('reports')
+      .select('*, listings!reports_listing_id_fkey(id, title, image_url, price, user_id)')
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== TELEGRAM WEBHOOK =====
 const webhookPath = `/webhook/${process.env.TELEGRAM_BOT_TOKEN}`;
 app.use(bot.webhookCallback(webhookPath));
