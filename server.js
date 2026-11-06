@@ -106,17 +106,21 @@ bot.on('contact', async (ctx) => {
 app.post('/api/send-sms', async (req, res) => {
   try {
     const { phone } = req.body;
-    console.log('🔥 [SEND-SMS] Пришел телефон:', `"${phone}"`, 'Длина:', phone?.length);
     if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
+    
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    
     await supabase.from('sms_codes').insert({
       phone: phone,
       code: code,
       expires_at: expiresAt
     });
+    
     console.log(`📱 SMS код для ${phone}: ${code}`);
-    res.json({ success: true, testCode: code });
+    
+    // Убрали testCode из ответа! Теперь код виден только в логах сервера.
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -126,26 +130,40 @@ app.post('/api/send-sms', async (req, res) => {
 app.post('/api/verify-code', async (req, res) => {
   try {
     const { phone, code } = req.body;
-    console.log('🔥 [VERIFY] Пришел телефон:', `"${phone}"`, 'Код:', code);
     if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
+
+    // Ищем по телефону и коду, без привязки к времени в SQL
     const { data: codes, error: codeError } = await supabase
       .from('sms_codes')
       .select('*')
       .eq('phone', phone)
       .eq('code', code)
-      .eq('used', false)
-      .gte('expires_at', new Date().toISOString())
       .order('created_at', { ascending: false })
       .limit(1);
+
     if (codeError || !codes || codes.length === 0) {
-      return res.status(400).json({ error: 'Неверный или истёкший код' });
+      return res.status(400).json({ error: 'Неверный код' });
     }
+
     const storedCode = codes[0];
+
+    // Проверяем, не использован ли он
+    if (storedCode.used === true) {
+      return res.status(400).json({ error: 'Этот код уже был использован' });
+    }
+
+    // Проверяем время истечения на стороне JS (защита от часовых поясов)
+    const expiresAt = new Date(storedCode.expires_at);
+    if (expiresAt < new Date()) {
+      return res.status(400).json({ error: 'Код истёк. Запросите новый.' });
+    }
+
     let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
     if (!user) {
       const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
       user = newUser;
     }
+    
     await supabase.from('sms_codes').update({ used: true }).eq('id', storedCode.id);
     res.json({ success: true, user: { id: user.id, phone: user.phone } });
   } catch (error) {
@@ -158,44 +176,62 @@ app.post('/api/verify-telegram-code', async (req, res) => {
   try {
     const { phone, code } = req.body;
     if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
+    
     const { data: binding, error: bindingError } = await supabase
       .from('telegram_bindings')
       .select('telegram_id')
       .eq('phone', phone)
       .single();
+      
     if (bindingError || !binding) {
       return res.status(400).json({ error: 'Номер не привязан к Telegram. Сначала получите код через бота.' });
     }
+    
     const attempts = failedAttempts.get(binding.telegram_id) || { count: 0, lastAttempt: 0 };
     const now = Date.now();
     if (now - attempts.lastAttempt < 10 * 60 * 1000 && attempts.count >= 5) {
       return res.status(429).json({ error: 'Слишком много попыток. Попробуйте через 10 минут или запросите новый код.' });
     }
+    
     const { data: codes, error: codeError } = await supabase
       .from('telegram_codes')
       .select('*')
       .eq('telegram_id', binding.telegram_id)
       .eq('code', code)
-      .eq('used', false)
-      .gte('expires_at', new Date().toISOString())
       .order('created_at', { ascending: false })
       .limit(1);
+      
     if (codeError || !codes || codes.length === 0) {
       attempts.count++;
       attempts.lastAttempt = now;
       failedAttempts.set(binding.telegram_id, attempts);
-      return res.status(400).json({ error: 'Неверный или истёкший код' });
+      return res.status(400).json({ error: 'Неверный код' });
     }
+    
     const storedCode = codes[0];
+    
+    if (storedCode.used === true) {
+      return res.status(400).json({ error: 'Этот код уже был использован' });
+    }
+    
+    const expiresAt = new Date(storedCode.expires_at);
+    if (expiresAt < new Date()) {
+      return res.status(400).json({ error: 'Код истёк. Запросите новый.' });
+    }
+    
     let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
     if (!user) {
       const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
       user = newUser;
     }
+    
     await supabase.from('telegram_codes').update({ used: true }).eq('id', storedCode.id);
+    
+    // Очищаем старые коды
     await supabase.from('telegram_codes').delete()
       .eq('telegram_id', binding.telegram_id)
       .eq('used', false);
+      
     failedAttempts.delete(binding.telegram_id);
     res.json({ success: true, user: { id: user.id, phone: user.phone } });
   } catch (error) {
