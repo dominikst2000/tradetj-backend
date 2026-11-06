@@ -106,6 +106,7 @@ bot.on('contact', async (ctx) => {
 app.post('/api/send-sms', async (req, res) => {
   try {
     const { phone } = req.body;
+    console.log('🔥 [SEND-SMS] Пришел телефон:', `"${phone}"`, 'Длина:', phone?.length);
     if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -125,6 +126,7 @@ app.post('/api/send-sms', async (req, res) => {
 app.post('/api/verify-code', async (req, res) => {
   try {
     const { phone, code } = req.body;
+    console.log('🔥 [VERIFY] Пришел телефон:', `"${phone}"`, 'Код:', code);
     if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
     const { data: codes, error: codeError } = await supabase
       .from('sms_codes')
