@@ -308,6 +308,24 @@ app.put('/api/users/:userId/name', async (req, res) => {
   }
 });
 
+// ===== Пользователь: Сохранить FCM токен =====
+app.post('/api/users/save-token', async (req, res) => {
+  try {
+    const { userId, token } = req.body;
+    if (!userId || !token) return res.status(400).json({ error: 'userId и token обязательны' });
+
+    const { error } = await supabase
+      .from('users')
+      .update({ fcm_token: token })
+      .eq('id', userId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Объявления: Получить список =====
 app.get('/api/listings', async (req, res) => {
   try {
@@ -527,6 +545,29 @@ app.post('/api/messages', async (req, res) => {
       sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration
     }]).select().single();
     if (error) throw error;
+        // ===== ОТПРАВЛЯЕМ ПУШ ПОЛУЧАТЕЛЮ =====
+    try {
+      const { data: receiver } = await supabase
+        .from('users')
+        .select('fcm_token')
+        .eq('id', receiver_id)
+        .single();
+
+      if (receiver && receiver.fcm_token) {
+        const messagePush = {
+          notification: {
+            title: 'Новое сообщение TradeTJ 💬',
+            body: content ? content : 'Вам отправили вложение',
+          },
+          token: receiver.fcm_token,
+        };
+        await admin.messaging().send(messagePush);
+        console.log(`✅ Пуш отправлен пользователю ${receiver_id}`);
+      }
+    } catch (pushError) {
+      console.log('❌ Ошибка отправки пуша:', pushError.message);
+    }
+    // =====================================
     res.status(201).json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
