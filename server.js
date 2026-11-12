@@ -554,16 +554,16 @@ app.post('/api/messages', async (req, res) => {
         .single();
 
       if (receiver && receiver.fcm_token) {
-                const messagePush = {
+        const messagePush = {
           notification: {
             title: 'Новое сообщение TradeTJ 💬',
             body: content ? content : 'Вам отправили вложение',
           },
           android: {
-            priority: 'high', // <--- ВОТ ЭТА СТРОЧКА ДЕЛАЕТ УВЕДОМЛЕНИЕ ВСПЛЫВАЮЩИМ
+            priority: 'high', // Высокий приоритет
             notification: {
-              channelId: 'high_importance_channel', // Название канала
-              sound: 'default',
+              channelId: 'high_importance_channel', // ID канала
+              sound: 'default', // Звук
             },
           },
           token: receiver.fcm_token,
