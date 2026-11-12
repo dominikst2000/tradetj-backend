@@ -1,4 +1,20 @@
 require('dotenv').config();
+const admin = require('firebase-admin');
+
+// Проверяем, есть ли переменная с ключом
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log('✅ Firebase Admin успешно инициализирован!');
+  } catch (error) {
+    console.error('❌ Ошибка парсинга ключа Firebase:', error.message);
+  }
+} else {
+  console.log('⚠️ Переменная FIREBASE_SERVICE_ACCOUNT не найдена!');
+}
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
@@ -826,6 +842,22 @@ app.get('/', (req, res) => {
 
 // ===== ЗАПУСК =====
 const PORT = process.env.PORT || 3000;
+app.post('/api/test-push', async (req, res) => {
+  const { token } = req.body;
+  try {
+    const message = {
+      notification: {
+        title: 'Привет от TradeTJ!',
+        body: 'Это тестовое уведомление работает!',
+      },
+      token: token,
+    };
+    const response = await admin.messaging().send(message);
+    res.json({ success: true, response });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 app.listen(PORT, () => {
   console.log(`🚀 Сервер запущен на порту ${PORT}`);
   console.log(` Telegram webhook: ${webhookPath}`);
