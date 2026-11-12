@@ -586,20 +586,33 @@ app.get('/api/conversations/:userId', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('messages')
-      .select('*')
+      .select('*, sender:sender_id(id, name, avatar_url, phone), receiver:receiver_id(id, name, avatar_url, phone)')
       .or(`sender_id.eq.${req.params.userId},receiver_id.eq.${req.params.userId}`)
       .order('created_at', { ascending: false });
+      
     if (error) throw error;
+    
     const conversations = [];
     const seen = new Set();
+    
     for (const msg of (data || [])) {
       const key = `${msg.sender_id}-${msg.receiver_id}-${msg.listing_id}`;
       const reverseKey = `${msg.receiver_id}-${msg.sender_id}-${msg.listing_id}`;
+      
       if (!seen.has(key) && !seen.has(reverseKey)) {
         seen.add(key);
-        conversations.push(msg);
+        
+        // Определяем, кто собеседник
+        const otherUser = msg.sender_id === req.params.userId ? msg.receiver : msg.sender;
+        
+        conversations.push({
+          ...msg,
+          other_user_name: otherUser?.name || otherUser?.phone || 'Пользователь',
+          other_user_avatar: otherUser?.avatar_url
+        });
       }
     }
+    
     res.json(conversations);
   } catch (error) {
     res.status(500).json({ error: error.message });
