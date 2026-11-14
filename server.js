@@ -558,6 +558,17 @@ app.delete('/api/messages/clear', async (req, res) => {
   }
 });
 
+// ===== Сообщение: Удалить одно =====
+app.delete('/api/messages/:id', async (req, res) => {
+  try {
+    const { error } = await supabase.from('messages').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Сообщения: Отправить =====
 app.post('/api/messages', async (req, res) => {
   try {
