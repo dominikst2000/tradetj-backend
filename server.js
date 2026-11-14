@@ -536,6 +536,28 @@ app.get('/api/messages', async (req, res) => {
   }
 });
 
+// ===== Сообщения: Удалить чат =====
+app.delete('/api/messages/clear', async (req, res) => {
+  try {
+    const { user1, user2, listing_id } = req.query;
+    if (!user1 || !user2) return res.status(400).json({ error: 'user1 и user2 обязательны' });
+
+    const orCondition = `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`;
+    
+    let query = supabase.from('messages').delete().or(orCondition);
+    if (listing_id && listing_id !== 'null') {
+      query = query.eq('listing_id', listing_id);
+    }
+
+    const { error } = await query;
+    if (error) throw error;
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Сообщения: Отправить =====
 app.post('/api/messages', async (req, res) => {
   try {
