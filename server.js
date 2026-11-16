@@ -687,7 +687,7 @@ app.get('/api/conversations/:userId', async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('messages')
-      .select('*, sender:sender_id(id, name, avatar_url, phone), receiver:receiver_id(id, name, avatar_url, phone)')
+      .select('*, sender:sender_id(id, name, avatar_url, phone), receiver:receiver_id(id, name, avatar_url, phone), listing:listing_id(id, title, image_url, price)')
       .or(`sender_id.eq.${req.params.userId},receiver_id.eq.${req.params.userId}`)
       .order('created_at', { ascending: false });
       
