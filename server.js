@@ -574,11 +574,13 @@ app.post('/api/messages', async (req, res) => {
   try {
     const { sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration } = req.body;
     if (!sender_id || !receiver_id) return res.status(400).json({ error: 'sender_id и receiver_id обязательны' });
+    
     const { data, error } = await supabase.from('messages').insert([{
       sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration
     }]).select().single();
     if (error) throw error;
-        // ===== ОТПРАВЛЯЕМ ПУШ ПОЛУЧАТЕЛЮ =====
+
+    // ===== ОТПРАВЛЯЕМ ПУШ ПОЛУЧАТЕЛЮ =====
     try {
       const { data: receiver } = await supabase
         .from('users')
@@ -593,10 +595,10 @@ app.post('/api/messages', async (req, res) => {
             body: content ? content : 'Вам отправили вложение',
           },
           android: {
-            priority: 'high', // Высокий приоритет
+            priority: 'high',
             notification: {
-              channelId: 'high_importance_channel', // ID канала
-              sound: 'default', // Звук
+              channelId: 'high_importance_channel',
+              sound: 'default',
             },
           },
           token: receiver.fcm_token,
@@ -607,13 +609,34 @@ app.post('/api/messages', async (req, res) => {
     } catch (pushError) {
       console.log('❌ Ошибка отправки пуша:', pushError.message);
     }
+
+    // ===== СОЗДАЕМ УВЕДОМЛЕНИЕ В БАЗЕ =====
+    try {
+      const { data: sender } = await supabase
+        .from('users')
+        .select('name, phone')
+        .eq('id', sender_id)
+        .single();
+      
+      const senderName = sender?.name || sender?.phone || 'Пользователь';
+      
+      await supabase.from('notifications').insert([{
+        user_id: receiver_id,
+        title: 'Новое сообщение 💬',
+        subtitle: `${senderName}: ${content || 'Вложение'}`,
+        type: 'message'
+      }]);
+      console.log(`✅ Уведомление создано для ${receiver_id}`);
+    } catch (notifError) {
+      console.log('❌ Ошибка создания уведомления:', notifError.message);
+    }
     // =====================================
+
     res.status(201).json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
-
 // ===== УВЕДОМЛЕНИЯ =====
 
 // 1. Получить уведомления пользователя
@@ -878,21 +901,40 @@ app.post('/api/reviews', async (req, res) => {
     if (seller_id === reviewer_id) {
       return res.status(400).json({ error: 'Нельзя оставить отзыв самому себе' });
     }
+    
     // Проверяем, не оставлял ли уже этот пользователь отзыв
     const { data: existing } = await supabase
       .from('reviews')
       .select('id')
       .eq('seller_id', seller_id)
       .eq('reviewer_id', reviewer_id);
+      
     if (existing && existing.length > 0) {
       return res.status(400).json({ error: 'Вы уже оставили отзыв этому продавцу' });
     }
+    
     const { data, error } = await supabase
       .from('reviews')
       .insert([{ seller_id, reviewer_id, rating, comment }])
       .select()
       .single();
+      
     if (error) throw error;
+
+    // ===== СОЗДАЕМ УВЕДОМЛЕНИЕ ДЛЯ ПРОДАВЦА =====
+    try {
+      await supabase.from('notifications').insert([{
+        user_id: seller_id,
+        title: 'Новый отзыв ⭐',
+        subtitle: `Вам поставили ${rating} звезд(ы)`,
+        type: 'review'
+      }]);
+      console.log(`✅ Уведомление об отзыве создано для ${seller_id}`);
+    } catch (notifError) {
+      console.log('❌ Ошибка создания уведомления:', notifError.message);
+    }
+    // ===============================================
+
     res.status(201).json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
