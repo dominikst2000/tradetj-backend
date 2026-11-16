@@ -614,6 +614,51 @@ app.post('/api/messages', async (req, res) => {
   }
 });
 
+// ===== УВЕДОМЛЕНИЯ =====
+
+// 1. Получить уведомления пользователя
+app.get('/api/notifications/:userId', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('notifications')
+      .select('*')
+      .eq('user_id', req.params.userId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 2. Отметить уведомление как прочитанное
+app.put('/api/notifications/:id/read', async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('notifications')
+      .update({ is_read: true })
+      .eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 3. Функция для создания уведомления (будем вызывать её из других роутов)
+async function createNotification(userId, title, subtitle, type) {
+  try {
+    await supabase.from('notifications').insert([{
+      user_id: userId,
+      title: title,
+      subtitle: subtitle,
+      type: type
+    }]);
+  } catch (error) {
+    console.error('Ошибка создания уведомления:', error.message);
+  }
+}
+
 // ===== Диалоги: Получить список =====
 app.get('/api/conversations/:userId', async (req, res) => {
   try {
