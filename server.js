@@ -922,7 +922,7 @@ app.post('/api/reviews', async (req, res) => {
       
     if (error) throw error;
 
-    // ===== СОЗДАЕМ УВЕДОМЛЕНИЕ ДЛЯ ПРОДАВЦА =====
+    // ===== УВЕДОМЛЕНИЕ В БАЗУ (уже есть) =====
     try {
       await supabase.from('notifications').insert([{
         user_id: seller_id,
@@ -934,7 +934,27 @@ app.post('/api/reviews', async (req, res) => {
     } catch (notifError) {
       console.log('❌ Ошибка создания уведомления:', notifError.message);
     }
-    // ===============================================
+
+    // ===== ПУШ В ШТОРКУ (НОВЫЙ БЛОК) =====
+    try {
+      const { data: seller } = await supabase
+        .from('users')
+        .select('fcm_token')
+        .eq('id', seller_id)
+        .single();
+
+      if (seller && seller.fcm_token) {
+        await admin.messaging().send({
+          notification: {
+            title: 'Новый отзыв ⭐',
+            body: `Вам поставили ${rating} звезд(ы)`,
+          },
+          token: seller.fcm_token,
+        });
+        console.log('✅ Пуш об отзыве отправлен продавцу');
+      }
+    } catch (e) { console.log('Ошибка пуша:', e.message); }
+    // ===================================
 
     res.status(201).json(data);
   } catch (error) {
@@ -987,10 +1007,10 @@ app.post('/api/reports', async (req, res) => {
 
     if (error) throw error;
 
-    // ===== ВОТ СЮДА ВСТАВЛЯЕШЬ КОД =====
+    // ===== УВЕДОМЛЕНИЕ В БАЗУ (уже есть) =====
     try {
       await supabase.from('notifications').insert([{
-        user_id: '5dac82e8-6c01-4f5e-865b-69d817a727cc', // Твой админский ID
+        user_id: '5dac82e8-6c01-4f5e-865b-69d817a727cc',
         title: 'Новая жалоба ⚠️',
         subtitle: `Причина: ${reason}`,
         type: 'report'
@@ -999,6 +1019,26 @@ app.post('/api/reports', async (req, res) => {
     } catch (notifError) {
       console.log('❌ Ошибка создания уведомления:', notifError.message);
     }
+
+    // ===== ПУШ В ШТОРКУ (НОВЫЙ БЛОК) =====
+    try {
+      const { data: admin } = await supabase
+        .from('users')
+        .select('fcm_token')
+        .eq('id', '5dac82e8-6c01-4f5e-865b-69d817a727cc')
+        .single();
+
+      if (admin && admin.fcm_token) {
+        await admin.messaging().send({
+          notification: {
+            title: 'Новая жалоба ⚠️',
+            body: `Причина: ${reason}`,
+          },
+          token: admin.fcm_token,
+        });
+        console.log('✅ Пуш о жалобе отправлен админу');
+      }
+    } catch (e) { console.log('Ошибка пуша:', e.message); }
     // ===================================
 
     res.status(201).json(data);
