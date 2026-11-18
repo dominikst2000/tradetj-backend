@@ -986,6 +986,21 @@ app.post('/api/reports', async (req, res) => {
       .single();
 
     if (error) throw error;
+
+    // ===== ВОТ СЮДА ВСТАВЛЯЕШЬ КОД =====
+    try {
+      await supabase.from('notifications').insert([{
+        user_id: '5dac82e8-6c01-4f5e-865b-69d817a727cc', // Твой админский ID
+        title: 'Новая жалоба ⚠️',
+        subtitle: `Причина: ${reason}`,
+        type: 'report'
+      }]);
+      console.log(`✅ Уведомление о жалобе создано для админа`);
+    } catch (notifError) {
+      console.log('❌ Ошибка создания уведомления:', notifError.message);
+    }
+    // ===================================
+
     res.status(201).json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
