@@ -696,9 +696,10 @@ app.get('/api/conversations/:userId', async (req, res) => {
     const conversations = [];
     const seen = new Set();
     
-    for (const msg of (data || [])) {
-      const key = `${msg.sender_id}-${msg.receiver_id}-${msg.listing_id}`;
-      const reverseKey = `${msg.receiver_id}-${msg.sender_id}-${msg.listing_id}`;
+        for (const msg of (data || [])) {
+      // Группируем только по участникам диалога (без listing_id)
+      const key = `${msg.sender_id}-${msg.receiver_id}`;
+      const reverseKey = `${msg.receiver_id}-${msg.sender_id}`;
       
       if (!seen.has(key) && !seen.has(reverseKey)) {
         seen.add(key);
