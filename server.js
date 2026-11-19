@@ -610,21 +610,42 @@ app.post('/api/messages', async (req, res) => {
       console.log('❌ Ошибка отправки пуша:', pushError.message);
     }
 
-    // ===== СОЗДАЕМ УВЕДОМЛЕНИЕ В БАЗЕ =====
+        // ===== СОЗДАЕМ УВЕДОМЛЕНИЕ В БАЗЕ =====
     try {
       const { data: sender } = await supabase
         .from('users')
-        .select('name, phone')
+        .select('name, phone, avatar_url')
         .eq('id', sender_id)
         .single();
       
       const senderName = sender?.name || sender?.phone || 'Пользователь';
       
+      // Получаем данные объявления (если есть)
+      let listingTitle = '';
+      let listingPrice = '';
+      if (listing_id) {
+        const { data: listing } = await supabase
+          .from('listings')
+          .select('title, price')
+          .eq('id', listing_id)
+          .single();
+        if (listing) {
+          listingTitle = listing.title;
+          listingPrice = listing.price;
+        }
+      }
+      
       await supabase.from('notifications').insert([{
         user_id: receiver_id,
         title: 'Новое сообщение 💬',
         subtitle: `${senderName}: ${content || 'Вложение'}`,
-        type: 'message'
+        type: 'message',
+        related_user_id: sender_id,
+        related_listing_id: listing_id,
+        other_user_name: senderName,
+        other_user_avatar: sender?.avatar_url,
+        related_listing_title: listingTitle,
+        related_listing_price: listingPrice
       }]);
       console.log(`✅ Уведомление создано для ${receiver_id}`);
     } catch (notifError) {
@@ -929,6 +950,7 @@ app.post('/api/reviews', async (req, res) => {
         title: 'Новый отзыв ⭐',
         subtitle: `Вам поставили ${rating} звезд(ы)`,
         type: 'review'
+        related_user_id: reviewer_id // <-- ДОБАВИЛИ ID АВТОРА ОТЗЫВА
       }]);
       console.log(`✅ Уведомление об отзыве создано для ${seller_id}`);
     } catch (notifError) {
