@@ -949,7 +949,7 @@ app.post('/api/reviews', async (req, res) => {
         user_id: seller_id,
         title: 'Новый отзыв ⭐',
         subtitle: `Вам поставили ${rating} звезд(ы)`,
-        type: 'review'
+        type: 'review',
         related_user_id: reviewer_id // <-- ДОБАВИЛИ ID АВТОРА ОТЗЫВА
       }]);
       console.log(`✅ Уведомление об отзыве создано для ${seller_id}`);
