@@ -329,7 +329,7 @@ app.post('/api/users/save-token', async (req, res) => {
 // ===== Объявления: Получить список =====
 app.get('/api/listings', async (req, res) => {
   try {
-    let query = supabase.from('listings').select('*');
+    let query = supabase.from('listings').select('*, users!listings_user_id_fkey(name, phone, avatar_url)');
     if (req.query.user_id) {
   query = query.eq('user_id', req.query.user_id);
 } else {
