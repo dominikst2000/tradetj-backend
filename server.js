@@ -448,6 +448,124 @@ app.get('/api/ads', async (req, res) => {
   }
 });
 
+// ===== АДМИНКА: Управление рекламными баннерами =====
+async function checkIsAdmin(userId) {
+  const { data } = await supabase
+    .from('users')
+    .select('is_admin, role')
+    .eq('id', userId)
+    .single();
+  return data?.is_admin === true || data?.role === 'admin';
+}
+
+// 1. Получить все баннеры (включая выключенные)
+app.get('/api/admin/ads', requireAuth, async (req, res) => {
+  try {
+    if (!(await checkIsAdmin(req.userId))) {
+      return res.status(403).json({ error: 'Доступ запрещён' });
+    }
+
+    const { data, error } = await supabase
+      .from('ads')
+      .select('*')
+      .order('sort_order', { ascending: true })
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 2. Создать новый баннер
+app.post('/api/admin/ads', requireAuth, async (req, res) => {
+  try {
+    if (!(await checkIsAdmin(req.userId))) {
+      return res.status(403).json({ error: 'Доступ запрещён' });
+    }
+
+    const {
+      title,
+      subtitle,
+      image_url,
+      target_category,
+      target_url,
+      color_start,
+      color_end,
+      sort_order,
+    } = req.body;
+
+    if (!title || !title.trim()) {
+      return res.status(400).json({ error: 'Заголовок баннера обязателен' });
+    }
+
+    const { data, error } = await supabase
+      .from('ads')
+      .insert([{
+        title: title.trim(),
+        subtitle: subtitle?.trim() || null,
+        image_url: image_url?.trim() || null,
+        target_category: target_category?.trim() || null,
+        target_url: target_url?.trim() || null,
+        color_start: color_start?.trim() || '#667eea',
+        color_end: color_end?.trim() || '#764ba2',
+        sort_order: Number(sort_order) || 0,
+        is_active: true,
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 3. Включить / выключить баннер
+app.put('/api/admin/ads/:id', requireAuth, async (req, res) => {
+  try {
+    if (!(await checkIsAdmin(req.userId))) {
+      return res.status(403).json({ error: 'Доступ запрещён' });
+    }
+
+    const { id } = req.params;
+    const { is_active } = req.body;
+
+    const { data, error } = await supabase
+      .from('ads')
+      .update({ is_active: Boolean(is_active) })
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 4. Удалить баннер
+app.delete('/api/admin/ads/:id', requireAuth, async (req, res) => {
+  try {
+    if (!(await checkIsAdmin(req.userId))) {
+      return res.status(403).json({ error: 'Доступ запрещён' });
+    }
+
+    const { error } = await supabase
+      .from('ads')
+      .delete()
+      .eq('id', req.params.id);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Объявления: Создать =====
 app.post('/api/listings', requireAuth, async (req, res) => {
   try {
