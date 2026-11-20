@@ -147,9 +147,7 @@ app.post('/api/send-sms', async (req, res) => {
   try {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
-    const { phone } = req.body;
-if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
-    
+
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     
