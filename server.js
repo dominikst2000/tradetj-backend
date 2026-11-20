@@ -501,10 +501,11 @@ app.post('/api/admin/ads', requireAuth, async (req, res) => {
     let finalImageUrl = null;
 
     if (image_base64) {
-      // Создаём бакет 'ads', если его ещё нет
       await supabase.storage.createBucket('ads', { public: true }).catch(() => {});
 
-      const buffer = Buffer.from(image_base64, 'base64');
+      // Очищаем возможный префикс data:image/...;base64,
+      const cleanBase64 = image_base64.replace(/^data:image\/\w+;base64,/, '');
+      const buffer = Buffer.from(cleanBase64, 'base64');
       const fileName = `banner_${Date.now()}.jpg`;
 
       const { error: uploadError } = await supabase.storage
@@ -514,7 +515,10 @@ app.post('/api/admin/ads', requireAuth, async (req, res) => {
           upsert: true,
         });
 
-      if (uploadError) throw uploadError;
+      if (uploadError) {
+        console.error('Ошибка загрузки в Storage:', uploadError);
+        return res.status(500).json({ error: `Ошибка Storage: ${uploadError.message}` });
+      }
 
       const { data: publicUrlData } = supabase.storage
         .from('ads')
@@ -537,9 +541,14 @@ app.post('/api/admin/ads', requireAuth, async (req, res) => {
       .select()
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error('Ошибка записи баннера в БД:', error);
+      return res.status(500).json({ error: `Ошибка БД: ${error.message}` });
+    }
+
     res.status(201).json(data);
   } catch (error) {
+    console.error('Ошибка POST /api/admin/ads:', error);
     res.status(500).json({ error: error.message });
   }
 });
