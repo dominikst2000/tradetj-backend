@@ -691,7 +691,7 @@ app.get('/api/messages', requireAuth, async (req, res) => {
     await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', user1);
 
     // Помечаем входящие сообщения от собеседника как прочитанные
-    let markReadQuery = supabase
+    await supabase
       .from('messages')
       .update({ is_read: true })
       .eq('receiver_id', user1)
