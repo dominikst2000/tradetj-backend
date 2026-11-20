@@ -574,6 +574,62 @@ app.delete('/api/favorites/:user_id/:listing_id', requireAuth, async (req, res) 
   }
 });
 
+// ===== Блокировка: Проверить статус между двумя пользователями =====
+app.get('/api/blocks/status/:otherUserId', requireAuth, async (req, res) => {
+  try {
+    const myId = req.userId;
+    const otherId = req.params.otherUserId;
+
+    const { data, error } = await supabase
+      .from('blocked_users')
+      .select('blocker_id, blocked_id')
+      .or(`and(blocker_id.eq.${myId},blocked_id.eq.${otherId}),and(blocker_id.eq.${otherId},blocked_id.eq.${myId})`);
+
+    if (error) throw error;
+
+    const blockedByMe = (data || []).some(row => row.blocker_id === myId);
+    const blockedMe = (data || []).some(row => row.blocker_id === otherId);
+
+    res.json({ blockedByMe, blockedMe });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Блокировка: Заблокировать пользователя =====
+app.post('/api/blocks', requireAuth, async (req, res) => {
+  try {
+    const { blocked_id } = req.body;
+    if (!blocked_id) return res.status(400).json({ error: 'blocked_id обязателен' });
+    if (blocked_id === req.userId) return res.status(400).json({ error: 'Нельзя заблокировать себя' });
+
+    const { error } = await supabase
+      .from('blocked_users')
+      .upsert([{ blocker_id: req.userId, blocked_id }], { onConflict: 'blocker_id,blocked_id' });
+
+    if (error) throw error;
+    res.status(201).json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Блокировка: Разблокировать пользователя =====
+app.delete('/api/blocks/:blockedUserId', requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from('blocked_users')
+      .delete()
+      .eq('blocker_id', req.userId)
+      .eq('blocked_id', req.params.blockedUserId);
+
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Сообщения: Получить =====
 app.get('/api/messages', requireAuth, async (req, res) => {
   try {
@@ -659,6 +715,18 @@ app.post('/api/messages', requireAuth, async (req, res) => {
     if (!otherUserId) return res.status(400).json({ error: 'otherUserId обязателен' });
 
     const senderId = req.userId;
+
+    // ===== Проверка блокировки между пользователями =====
+    const { data: blockCheck } = await supabase
+      .from('blocked_users')
+      .select('id')
+      .or(`and(blocker_id.eq.${senderId},blocked_id.eq.${otherUserId}),and(blocker_id.eq.${otherUserId},blocked_id.eq.${senderId})`)
+      .limit(1);
+
+    if (blockCheck && blockCheck.length > 0) {
+      return res.status(403).json({ error: 'Отправка сообщений недоступна: пользователь заблокирован' });
+    }
+    // =====================================================
 
     const { data, error } = await supabase.from('messages').insert([{
       sender_id: senderId,
