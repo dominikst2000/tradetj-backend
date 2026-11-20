@@ -687,8 +687,21 @@ app.get('/api/messages', requireAuth, async (req, res) => {
     const user1 = req.userId;
     const user2 = otherUserId;
 
-    // Обновляем время последнего визита
+   // Обновляем время последнего визита
     await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', user1);
+
+    // Помечаем входящие сообщения от собеседника как прочитанные
+    let markReadQuery = supabase
+      .from('messages')
+      .update({ is_read: true })
+      .eq('receiver_id', user1)
+      .eq('sender_id', user2)
+      .eq('is_read', false);
+
+    if (listing_id && listing_id !== 'null' && listing_id !== 'undefined') {
+      markReadQuery = markReadQuery.eq('listing_id', listing_id);
+    }
+    await markReadQuery;
 
     const orCondition = `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`;
 
@@ -910,6 +923,33 @@ app.put('/api/notifications/:id/read', requireAuth, async (req, res) => {
       .eq('user_id', req.userId);
     if (error) throw error;
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Счётчики непрочитанных сообщений и уведомлений =====
+app.get('/api/unread-counts', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    const [msgRes, notifRes] = await Promise.all([
+      supabase
+        .from('messages')
+        .select('id', { count: 'exact', head: true })
+        .eq('receiver_id', userId)
+        .eq('is_read', false),
+      supabase
+        .from('notifications')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId)
+        .eq('is_read', false),
+    ]);
+
+    res.json({
+      unreadMessages: msgRes.count || 0,
+      unreadNotifications: notifRes.count || 0,
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
