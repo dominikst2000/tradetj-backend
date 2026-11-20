@@ -438,6 +438,9 @@ app.put('/api/listings/:id', requireAuth, async (req, res) => {
 
     // Проверка владельца перед обновлением
     const { data: existing } = await supabase.from('listings').select('user_id').eq('id', req.params.id).single();
+    if (!existing) {
+      return res.status(404).json({ error: 'Объявление не найдено' });
+    }
     if (existing.user_id !== req.userId) {
       return res.status(403).json({ error: 'Нет прав доступа' });
     }
@@ -469,6 +472,32 @@ app.put('/api/listings/:id/status', requireAuth, async (req, res) => {
       .single();
     if (error) throw error;
     res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== Объявления: Увеличить счётчик просмотров =====
+app.post('/api/listings/:id/view', async (req, res) => {
+  try {
+    const { data: item, error: fetchError } = await supabase
+      .from('listings')
+      .select('views')
+      .eq('id', req.params.id)
+      .single();
+
+    if (fetchError || !item) {
+      return res.status(404).json({ error: 'Объявление не найдено' });
+    }
+
+    const nextViews = (item.views || 0) + 1;
+    const { error: updateError } = await supabase
+      .from('listings')
+      .update({ views: nextViews })
+      .eq('id', req.params.id);
+
+    if (updateError) throw updateError;
+    res.json({ views: nextViews });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
