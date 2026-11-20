@@ -431,6 +431,23 @@ app.get('/api/listings', async (req, res) => {
   }
 });
 
+// ===== Рекламные баннеры: Получить активные =====
+app.get('/api/ads', async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('ads')
+      .select('*')
+      .eq('is_active', true)
+      .order('sort_order', { ascending: true })
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== Объявления: Создать =====
 app.post('/api/listings', requireAuth, async (req, res) => {
   try {
