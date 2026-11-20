@@ -22,8 +22,31 @@ const path = require('path');
 const fs = require('fs');
 const { createClient } = require('@supabase/supabase-js');
 const { Telegraf } = require('telegraf');
+const jwt = require('jsonwebtoken'); // <-- ДОБАВЛЕНО
 const { GoogleGenerativeAI } = require('@google/generative-ai'); // <-- ДОБАВЛЕНО
 const ADMIN_ID = '5dac82e8-6c01-4f5e-865b-69d817a727cc'; // Твой секретный ID
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  console.error('❌ JWT_SECRET not set in environment');
+  process.exit(1);
+}
+
+// Auth middleware
+const requireAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Токен аутентификации не предоставлен' });
+  }
+  const token = authHeader.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.userId = decoded.sub;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Недействительный токен' });
+  }
+};
 
 const app = express();
 
@@ -53,6 +76,7 @@ app.use('/uploads', express.static(UPLOAD_DIR));
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const pendingVerifications = new Map();
 const failedAttempts = new Map();
+const smsCooldowns = new Map();
 
 bot.start(async (ctx) => {
   const chatId = ctx.chat.id;
@@ -123,6 +147,8 @@ app.post('/api/send-sms', async (req, res) => {
   try {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
+    const { phone } = req.body;
+if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
     
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -179,9 +205,10 @@ app.post('/api/verify-code', async (req, res) => {
       const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
       user = newUser;
     }
-    
+
     await supabase.from('sms_codes').update({ used: true }).eq('id', storedCode.id);
-    res.json({ success: true, user: { id: user.id, phone: user.phone } });
+    const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ success: true, user: { id: user.id, phone: user.phone }, token });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -192,23 +219,23 @@ app.post('/api/verify-telegram-code', async (req, res) => {
   try {
     const { phone, code } = req.body;
     if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
-    
+
     const { data: binding, error: bindingError } = await supabase
       .from('telegram_bindings')
       .select('telegram_id')
       .eq('phone', phone)
       .single();
-      
+
     if (bindingError || !binding) {
       return res.status(400).json({ error: 'Номер не привязан к Telegram. Сначала получите код через бота.' });
     }
-    
+
     const attempts = failedAttempts.get(binding.telegram_id) || { count: 0, lastAttempt: 0 };
     const now = Date.now();
     if (now - attempts.lastAttempt < 10 * 60 * 1000 && attempts.count >= 5) {
       return res.status(429).json({ error: 'Слишком много попыток. Попробуйте через 10 минут или запросите новый код.' });
     }
-    
+
     const { data: codes, error: codeError } = await supabase
       .from('telegram_codes')
       .select('*')
@@ -216,52 +243,53 @@ app.post('/api/verify-telegram-code', async (req, res) => {
       .eq('code', code)
       .order('created_at', { ascending: false })
       .limit(1);
-      
+
     if (codeError || !codes || codes.length === 0) {
       attempts.count++;
       attempts.lastAttempt = now;
       failedAttempts.set(binding.telegram_id, attempts);
       return res.status(400).json({ error: 'Неверный код' });
     }
-    
+
     const storedCode = codes[0];
-    
+
     if (storedCode.used === true) {
       return res.status(400).json({ error: 'Этот код уже был использован' });
     }
-    
+
     const expiresAt = new Date(storedCode.expires_at);
     if (expiresAt < new Date()) {
       return res.status(400).json({ error: 'Код истёк. Запросите новый.' });
     }
-    
+
     let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
     if (!user) {
       const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
       user = newUser;
     }
-    
+
     await supabase.from('telegram_codes').update({ used: true }).eq('id', storedCode.id);
-    
+
     // Очищаем старые коды
     await supabase.from('telegram_codes').delete()
       .eq('telegram_id', binding.telegram_id)
       .eq('used', false);
-      
+
     failedAttempts.delete(binding.telegram_id);
-    res.json({ success: true, user: { id: user.id, phone: user.phone } });
+    const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ success: true, user: { id: user.id, phone: user.phone }, token });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
 // ===== Пользователь: Получить данные (для аватарки) =====
-app.get('/api/users/:id', async (req, res) => {
+app.get('/api/users/:id', requireAuth, async (req, res) => {
   try {
     // Обновляем время последнего визита (если это твой профиль)
     await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', req.params.id);
-    
-    const { data, error } = await supabase.from('users').select('*').eq('id', req.params.id).single();
+
+    const { data, error } = await supabase.from('users').select('id, name, avatar_url, created_at, is_blocked, warnings, last_seen').eq('id', req.params.id).single();
     if (error) throw error;
     res.json(data);
   } catch (error) {
@@ -269,8 +297,11 @@ app.get('/api/users/:id', async (req, res) => {
   }
 });
 // ===== Пользователь: Обновить аватарку =====
-app.put('/api/users/:userId/avatar', async (req, res) => {
+app.put('/api/users/:userId/avatar', requireAuth, async (req, res) => {
   try {
+    if (req.userId !== req.params.userId) {
+      return res.status(403).json({ error: 'Доступ запрещен' });
+    }
     const { avatar_url } = req.body;
     if (!avatar_url) return res.status(400).json({ error: 'avatar_url обязателен' });
     
@@ -289,18 +320,21 @@ app.put('/api/users/:userId/avatar', async (req, res) => {
 });
 
 // ===== Пользователь: Обновить имя =====
-app.put('/api/users/:userId/name', async (req, res) => {
+app.put('/api/users/:userId/name', requireAuth, async (req, res) => {
   try {
     const { name } = req.body;
     if (!name || name.trim().isEmpty) return res.status(400).json({ error: 'Имя обязательно' });
-    
+    if (req.userId !== req.params.userId) {
+      return res.status(403).json({ error: 'Доступ запрещен' });
+    }
+
     const { data, error } = await supabase
       .from('users')
       .update({ name: name.trim() })
       .eq('id', req.params.userId)
       .select()
       .single();
-      
+
     if (error) throw error;
     res.json(data);
   } catch (error) {
@@ -309,15 +343,15 @@ app.put('/api/users/:userId/name', async (req, res) => {
 });
 
 // ===== Пользователь: Сохранить FCM токен =====
-app.post('/api/users/save-token', async (req, res) => {
+app.post('/api/users/save-token', requireAuth, async (req, res) => {
   try {
-    const { userId, token } = req.body;
-    if (!userId || !token) return res.status(400).json({ error: 'userId и token обязательны' });
+    const { token } = req.body;
+    if (!token) return res.status(400).json({ error: 'token обязателен' });
 
     const { error } = await supabase
       .from('users')
       .update({ fcm_token: token })
-      .eq('id', userId);
+      .eq('id', req.userId);
 
     if (error) throw error;
     res.json({ success: true });
@@ -352,22 +386,24 @@ app.get('/api/listings', async (req, res) => {
 });
 
 // ===== Объявления: Создать =====
-app.post('/api/listings', async (req, res) => {
+app.post('/api/listings', requireAuth, async (req, res) => {
   try {
     // ДОБАВИЛИ city в конце
-    const { user_id, title, price, description, category, images, image_url, phone, latitude, longitude, city } = req.body; 
-    if (!user_id || !title || !price) return res.status(400).json({ error: 'user_id, title и price обязательны' });
+    const { title, price, description, category, images, image_url, phone, latitude, longitude, city } = req.body;
+    if (!title || !price) return res.status(400).json({ error: 'title и price обязательны' });
+
+    const userId = req.userId;
 
     // ===== ВОТ ЭТИ 3 СТРОЧКИ НУЖНО ДОБАВИТЬ =====
-    const { data: user } = await supabase.from('users').select('is_blocked').eq('id', user_id).single();
+    const { data: user } = await supabase.from('users').select('is_blocked').eq('id', userId).single();
     if (user && user.is_blocked) {
       return res.status(403).json({ error: 'Ваш аккаунт заблокирован. Свяжитесь с поддержкой.' });
     }
     // =============================================
 
     const { data, error } = await supabase.from('listings').insert([{
-      user_id, title, price, description, category, images, image_url, phone, latitude, longitude, 
-      city 
+      user_id: userId, title, price, description, category, images, image_url, phone, latitude, longitude,
+      city
     }]).select().single();
     if (error) throw error;
     res.status(201).json(data);
@@ -376,9 +412,9 @@ app.post('/api/listings', async (req, res) => {
   }
 });
 // ===== Объявления: Удалить =====
-app.delete('/api/listings/:id', async (req, res) => {
+app.delete('/api/listings/:id', requireAuth, async (req, res) => {
   try {
-    const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
+    const { error } = await supabase.from('listings').delete().eq('id', req.params.id).eq('user_id', req.userId);
     if (error) throw error;
     res.json({ success: true });
   } catch (error) {
@@ -387,10 +423,10 @@ app.delete('/api/listings/:id', async (req, res) => {
 });
 
 // ===== Объявления: Редактировать =====
-app.put('/api/listings/:id', async (req, res) => {
+app.put('/api/listings/:id', requireAuth, async (req, res) => {
   try {
     const { title, price, description, category, images, image_url, city } = req.body;
-    
+
     // Собираем объект только с теми полями, которые пришли
     const updateData = {};
     if (title) updateData.title = title;
@@ -401,13 +437,19 @@ app.put('/api/listings/:id', async (req, res) => {
     if (image_url) updateData.image_url = image_url;
     if (city) updateData.city = city;
 
+    // Проверка владельца перед обновлением
+    const { data: existing } = await supabase.from('listings').select('user_id').eq('id', req.params.id).single();
+    if (existing.user_id !== req.userId) {
+      return res.status(403).json({ error: 'Нет прав доступа' });
+    }
+
     const { data, error } = await supabase
       .from('listings')
       .update(updateData)
       .eq('id', req.params.id)
       .select()
       .single();
-      
+
     if (error) throw error;
     res.json(data);
   } catch (error) {
@@ -416,13 +458,14 @@ app.put('/api/listings/:id', async (req, res) => {
 });
 
 // ===== Объявления: Изменить статус (Продано/Активно) =====
-app.put('/api/listings/:id/status', async (req, res) => {
+app.put('/api/listings/:id/status', requireAuth, async (req, res) => {
   try {
     const { is_sold } = req.body;
     const { data, error } = await supabase
       .from('listings')
       .update({ is_sold })
       .eq('id', req.params.id)
+      .eq('user_id', req.userId)
       .select()
       .single();
     if (error) throw error;
@@ -433,7 +476,7 @@ app.put('/api/listings/:id/status', async (req, res) => {
 });
 
 // ===== Загрузка файлов в Supabase Storage =====
-app.post('/api/upload', upload.single('photo'), async (req, res) => {
+app.post('/api/upload', requireAuth, upload.single('photo'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
     
@@ -467,9 +510,9 @@ app.post('/api/upload', upload.single('photo'), async (req, res) => {
 });
 
 // ===== Избранное: Получить =====
-app.get('/api/favorites/:user_id', async (req, res) => {
+app.get('/api/favorites/:user_id', requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase.from('favorites').select('listing_id').eq('user_id', req.params.user_id);
+    const { data, error } = await supabase.from('favorites').select('listing_id').eq('user_id', req.userId);
     if (error) throw error;
     res.json(data.map(f => f.listing_id));
   } catch (error) {
@@ -478,11 +521,11 @@ app.get('/api/favorites/:user_id', async (req, res) => {
 });
 
 // ===== Избранное: Добавить =====
-app.post('/api/favorites', async (req, res) => {
+app.post('/api/favorites', requireAuth, async (req, res) => {
   try {
-    const { user_id, listing_id } = req.body;
-    if (!user_id || !listing_id) return res.status(400).json({ error: 'user_id и listing_id обязательны' });
-    const { data, error } = await supabase.from('favorites').insert([{ user_id, listing_id }]).select().single();
+    const { listing_id } = req.body;
+    if (!listing_id) return res.status(400).json({ error: 'listing_id обязателен' });
+    const { data, error } = await supabase.from('favorites').insert([{ user_id: req.userId, listing_id }]).select().single();
     if (error) throw error;
     res.status(201).json(data);
   } catch (error) {
@@ -491,10 +534,10 @@ app.post('/api/favorites', async (req, res) => {
 });
 
 // ===== Избранное: Удалить =====
-app.delete('/api/favorites/:user_id/:listing_id', async (req, res) => {
+app.delete('/api/favorites/:user_id/:listing_id', requireAuth, async (req, res) => {
   try {
     const { error } = await supabase.from('favorites').delete()
-      .eq('user_id', req.params.user_id)
+      .eq('user_id', req.userId)
       .eq('listing_id', req.params.listing_id);
     if (error) throw error;
     res.json({ success: true });
@@ -504,31 +547,34 @@ app.delete('/api/favorites/:user_id/:listing_id', async (req, res) => {
 });
 
 // ===== Сообщения: Получить =====
-app.get('/api/messages', async (req, res) => {
+app.get('/api/messages', requireAuth, async (req, res) => {
   try {
-    // Сначала получаем параметры из запроса
-    const { user1, user2, listing_id } = req.query;
-    if (!user1 || !user2) return res.status(400).json({ error: 'user1 и user2 обязательны' });
+    // Используем req.userId как первого участника, otherUserId из query как второго
+    const { otherUserId, listing_id } = req.query;
+    if (!otherUserId) return res.status(400).json({ error: 'otherUserId обязателен' });
 
-    // Теперь обновляем время последнего визита (user1 уже существует)
+    const user1 = req.userId;
+    const user2 = otherUserId;
+
+    // Обновляем время последнего визита
     await supabase.from('users').update({ last_seen: new Date().toISOString() }).eq('id', user1);
 
     const orCondition = `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`;
-    
+
     let query = supabase.from('messages').select('*').or(orCondition);
-    
+
     // Оставляем фильтр по listing_id (или убираем, если хочешь, чтобы чат был общим)
     if (listing_id && listing_id !== 'null' && listing_id !== 'undefined') {
       query = query.eq('listing_id', listing_id);
     }
-    
+
     const { data, error } = await query.order('created_at', { ascending: true });
-    
+
     if (error) {
       console.error('Supabase error:', error);
       return res.status(500).json({ error: error.message });
     }
-    
+
     res.json(data || []);
   } catch (error) {
     console.error('Server error:', error.message);
@@ -537,13 +583,16 @@ app.get('/api/messages', async (req, res) => {
 });
 
 // ===== Сообщения: Удалить чат =====
-app.delete('/api/messages/clear', async (req, res) => {
+app.delete('/api/messages/clear', requireAuth, async (req, res) => {
   try {
-    const { user1, user2, listing_id } = req.query;
-    if (!user1 || !user2) return res.status(400).json({ error: 'user1 и user2 обязательны' });
+    const { otherUserId, listing_id } = req.query;
+    if (!otherUserId) return res.status(400).json({ error: 'otherUserId обязателен' });
+
+    const user1 = req.userId;
+    const user2 = otherUserId;
 
     const orCondition = `and(sender_id.eq.${user1},receiver_id.eq.${user2}),and(sender_id.eq.${user2},receiver_id.eq.${user1})`;
-    
+
     let query = supabase.from('messages').delete().or(orCondition);
     if (listing_id && listing_id !== 'null') {
       query = query.eq('listing_id', listing_id);
@@ -551,7 +600,7 @@ app.delete('/api/messages/clear', async (req, res) => {
 
     const { error } = await query;
     if (error) throw error;
-    
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -559,8 +608,14 @@ app.delete('/api/messages/clear', async (req, res) => {
 });
 
 // ===== Сообщение: Удалить одно =====
-app.delete('/api/messages/:id', async (req, res) => {
+app.delete('/api/messages/:id', requireAuth, async (req, res) => {
   try {
+    const { data: msg, error: findError } = await supabase
+      .from('messages').select('sender_id, receiver_id').eq('id', req.params.id).single();
+    if (findError || !msg) return res.status(404).json({ error: 'Сообщение не найдено' });
+    if (msg.sender_id !== req.userId && msg.receiver_id !== req.userId) {
+      return res.status(403).json({ error: 'Нет прав' });
+    }
     const { error } = await supabase.from('messages').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
@@ -570,13 +625,21 @@ app.delete('/api/messages/:id', async (req, res) => {
 });
 
 // ===== Сообщения: Отправить =====
-app.post('/api/messages', async (req, res) => {
+app.post('/api/messages', requireAuth, async (req, res) => {
   try {
-    const { sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration } = req.body;
-    if (!sender_id || !receiver_id) return res.status(400).json({ error: 'sender_id и receiver_id обязательны' });
-    
+    const { otherUserId, listing_id, content, image_url, audio_url, audio_duration } = req.body;
+    if (!otherUserId) return res.status(400).json({ error: 'otherUserId обязателен' });
+
+    const senderId = req.userId;
+
     const { data, error } = await supabase.from('messages').insert([{
-      sender_id, receiver_id, listing_id, content, image_url, audio_url, audio_duration
+      sender_id: senderId,
+      receiver_id: otherUserId,
+      listing_id,
+      content,
+      image_url,
+      audio_url,
+      audio_duration
     }]).select().single();
     if (error) throw error;
 
@@ -585,7 +648,7 @@ app.post('/api/messages', async (req, res) => {
       const { data: receiver } = await supabase
         .from('users')
         .select('fcm_token')
-        .eq('id', receiver_id)
+        .eq('id', otherUserId)
         .single();
 
       if (receiver && receiver.fcm_token) {
@@ -604,7 +667,7 @@ app.post('/api/messages', async (req, res) => {
           token: receiver.fcm_token,
         };
         await admin.messaging().send(messagePush);
-        console.log(`✅ Пуш отправлен пользователю ${receiver_id}`);
+        console.log(`✅ Пуш отправлен пользователю ${otherUserId}`);
       }
     } catch (pushError) {
       console.log('❌ Ошибка отправки пуша:', pushError.message);
@@ -615,11 +678,11 @@ app.post('/api/messages', async (req, res) => {
       const { data: sender } = await supabase
         .from('users')
         .select('name, phone, avatar_url')
-        .eq('id', sender_id)
+        .eq('id', senderId)
         .single();
-      
+
       const senderName = sender?.name || sender?.phone || 'Пользователь';
-      
+
       // Получаем данные объявления (если есть)
       let listingTitle = '';
       let listingPrice = '';
@@ -634,20 +697,20 @@ app.post('/api/messages', async (req, res) => {
           listingPrice = listing.price;
         }
       }
-      
+
       await supabase.from('notifications').insert([{
-        user_id: receiver_id,
+        user_id: otherUserId,
         title: 'Новое сообщение 💬',
         subtitle: `${senderName}: ${content || 'Вложение'}`,
         type: 'message',
-        related_user_id: sender_id,
+        related_user_id: senderId,
         related_listing_id: listing_id,
         other_user_name: senderName,
         other_user_avatar: sender?.avatar_url,
         related_listing_title: listingTitle,
         related_listing_price: listingPrice
       }]);
-      console.log(`✅ Уведомление создано для ${receiver_id}`);
+      console.log(`✅ Уведомление создано для ${otherUserId}`);
     } catch (notifError) {
       console.log('❌ Ошибка создания уведомления:', notifError.message);
     }
@@ -661,12 +724,12 @@ app.post('/api/messages', async (req, res) => {
 // ===== УВЕДОМЛЕНИЯ =====
 
 // 1. Получить уведомления пользователя
-app.get('/api/notifications/:userId', async (req, res) => {
+app.get('/api/notifications/:userId', requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('notifications')
       .select('*')
-      .eq('user_id', req.params.userId)
+      .eq('user_id', req.userId)
       .order('created_at', { ascending: false });
     if (error) throw error;
     res.json(data || []);
@@ -676,12 +739,13 @@ app.get('/api/notifications/:userId', async (req, res) => {
 });
 
 // 2. Отметить уведомление как прочитанное
-app.put('/api/notifications/:id/read', async (req, res) => {
+app.put('/api/notifications/:id/read', requireAuth, async (req, res) => {
   try {
     const { error } = await supabase
       .from('notifications')
       .update({ is_read: true })
-      .eq('id', req.params.id);
+      .eq('id', req.params.id)
+      .eq('user_id', req.userId);
     if (error) throw error;
     res.json({ success: true });
   } catch (error) {
@@ -704,38 +768,39 @@ async function createNotification(userId, title, subtitle, type) {
 }
 
 // ===== Диалоги: Получить список =====
-app.get('/api/conversations/:userId', async (req, res) => {
+app.get('/api/conversations/:userId', requireAuth, async (req, res) => {
   try {
+    const userId = req.userId;
     const { data, error } = await supabase
       .from('messages')
-      .select('*, sender:sender_id(id, name, avatar_url, phone), receiver:receiver_id(id, name, avatar_url, phone), listing:listing_id(id, title, image_url, price)')
-      .or(`sender_id.eq.${req.params.userId},receiver_id.eq.${req.params.userId}`)
+      .select('*, sender:sender_id(id, name, avatar_url), receiver:receiver_id(id, name, avatar_url), listing:listing_id(id, title, image_url, price)')
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
       .order('created_at', { ascending: false });
-      
+
     if (error) throw error;
-    
+
     const conversations = [];
     const seen = new Set();
-    
-        for (const msg of (data || [])) {
+
+    for (const msg of (data || [])) {
       // Группируем только по участникам диалога (без listing_id)
       const key = `${msg.sender_id}-${msg.receiver_id}`;
       const reverseKey = `${msg.receiver_id}-${msg.sender_id}`;
-      
+
       if (!seen.has(key) && !seen.has(reverseKey)) {
         seen.add(key);
-        
+
         // Определяем, кто собеседник
-        const otherUser = msg.sender_id === req.params.userId ? msg.receiver : msg.sender;
-        
+        const otherUser = msg.sender_id === userId ? msg.receiver : msg.sender;
+
         conversations.push({
           ...msg,
-          other_user_name: otherUser?.name || otherUser?.phone || 'Пользователь',
+          other_user_name: otherUser?.name || 'Пользователь',
           other_user_avatar: otherUser?.avatar_url
         });
       }
     }
-    
+
     res.json(conversations);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -790,13 +855,11 @@ app.post('/api/ai/generate', async (req, res) => {
 });
 
 // ===== АДМИНКА: Получить все объявления =====
-app.get('/api/admin/listings', async (req, res) => {
+app.get('/api/admin/listings', requireAuth, async (req, res) => {
   try {
-    const userId = req.query.user_id; // Приложение будет передавать свой ID
-    if (userId !== ADMIN_ID) {
+    if (req.userId !== ADMIN_ID) {
       return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
     }
-
     const { data, error } = await supabase.from('listings').select('*').order('created_at', { ascending: false });
     if (error) throw error;
     res.json(data || []);
@@ -806,13 +869,11 @@ app.get('/api/admin/listings', async (req, res) => {
 });
 
 // ===== АДМИНКА: Удалить любое объявление =====
-app.delete('/api/admin/listings/:id', async (req, res) => {
+app.delete('/api/admin/listings/:id', requireAuth, async (req, res) => {
   try {
-    const userId = req.query.user_id;
-    if (userId !== ADMIN_ID) {
+    if (req.userId !== ADMIN_ID) {
       return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
     }
-
     const { error } = await supabase.from('listings').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true, message: 'Объявление удалено' });
@@ -820,16 +881,13 @@ app.delete('/api/admin/listings/:id', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-// ==========================================================
 
 // ===== АДМИНКА: Получить всех пользователей =====
-app.get('/api/admin/users', async (req, res) => {
+app.get('/api/admin/users', requireAuth, async (req, res) => {
   try {
-    const userId = req.query.user_id;
-    if (userId !== ADMIN_ID) {
+    if (req.userId !== ADMIN_ID) {
       return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
     }
-
     const { data, error } = await supabase.from('users').select('*').order('created_at', { ascending: false });
     if (error) throw error;
     res.json(data || []);
@@ -839,18 +897,14 @@ app.get('/api/admin/users', async (req, res) => {
 });
 
 // ===== АДМИНКА: Удалить пользователя =====
-app.delete('/api/admin/users/:id', async (req, res) => {
+app.delete('/api/admin/users/:id', requireAuth, async (req, res) => {
   try {
-    const userId = req.query.user_id;
-    if (userId !== ADMIN_ID) {
+    if (req.userId !== ADMIN_ID) {
       return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
     }
-
     if (req.params.id === ADMIN_ID) {
       return res.status(400).json({ error: 'Вы не можете удалить самого себя!' });
     }
-
-    // Удаляем пользователя (объявления и сообщения удалятся каскадно, если настроено в базе)
     const { error } = await supabase.from('users').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true, message: 'Пользователь удален' });
@@ -859,15 +913,12 @@ app.delete('/api/admin/users/:id', async (req, res) => {
   }
 });
 
-// ===== АДМИНКА: Изменить статус пользователя (предупредить/забанить) =====
-app.put('/api/admin/users/:id/status', async (req, res) => {
+// ===== АДМИНКА: Изменить статус пользователя =====
+app.put('/api/admin/users/:id/status', requireAuth, async (req, res) => {
   try {
-    const adminId = req.query.user_id;
-    if (adminId !== ADMIN_ID) return res.status(403).json({ error: 'Доступ запрещен' });
-
-    const { action } = req.body; // 'warn', 'block' или 'unblock'
+    if (req.userId !== ADMIN_ID) return res.status(403).json({ error: 'Доступ запрещен' });
+    const { action } = req.body;
     const userId = req.params.id;
-
     if (userId === ADMIN_ID) return res.status(400).json({ error: 'Вы не можете забанить себя!' });
 
     if (action === 'block') {
@@ -875,12 +926,10 @@ app.put('/api/admin/users/:id/status', async (req, res) => {
     } else if (action === 'unblock') {
       await supabase.from('users').update({ is_blocked: false }).eq('id', userId);
     } else if (action === 'warn') {
-      // Получаем текущее количество и прибавляем 1
       const { data: user } = await supabase.from('users').select('warnings').eq('id', userId).single();
       const currentWarnings = user?.warnings || 0;
       await supabase.from('users').update({ warnings: currentWarnings + 1 }).eq('id', userId);
     }
-
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -914,33 +963,35 @@ app.get('/api/reviews/:sellerId', async (req, res) => {
 });
 
 // ===== Отзывы: Оставить =====
-app.post('/api/reviews', async (req, res) => {
+app.post('/api/reviews', requireAuth, async (req, res) => {
   try {
-    const { seller_id, reviewer_id, rating, comment } = req.body;
-    if (!seller_id || !reviewer_id || !rating) {
+    const { seller_id, rating, comment } = req.body;
+    const reviewerId = req.userId;
+
+    if (!seller_id || !rating) {
       return res.status(400).json({ error: 'Заполните все поля' });
     }
-    if (seller_id === reviewer_id) {
+    if (seller_id === reviewerId) {
       return res.status(400).json({ error: 'Нельзя оставить отзыв самому себе' });
     }
-    
+
     // Проверяем, не оставлял ли уже этот пользователь отзыв
     const { data: existing } = await supabase
       .from('reviews')
       .select('id')
       .eq('seller_id', seller_id)
-      .eq('reviewer_id', reviewer_id);
-      
+      .eq('reviewer_id', reviewerId);
+
     if (existing && existing.length > 0) {
       return res.status(400).json({ error: 'Вы уже оставили отзыв этому продавцу' });
     }
-    
+
     const { data, error } = await supabase
       .from('reviews')
-      .insert([{ seller_id, reviewer_id, rating, comment }])
+      .insert([{ seller_id, reviewer_id: reviewerId, rating, comment }])
       .select()
       .single();
-      
+
     if (error) throw error;
 
     // ===== УВЕДОМЛЕНИЕ В БАЗУ (уже есть) =====
@@ -950,7 +1001,7 @@ app.post('/api/reviews', async (req, res) => {
         title: 'Новый отзыв ⭐',
         subtitle: `Вам поставили ${rating} звезд(ы)`,
         type: 'review',
-        related_user_id: reviewer_id // <-- ДОБАВИЛИ ID АВТОРА ОТЗЫВА
+        related_user_id: reviewerId // <-- ДОБАВИЛИ ID АВТОРА ОТЗЫВА
       }]);
       console.log(`✅ Уведомление об отзыве создано для ${seller_id}`);
     } catch (notifError) {
@@ -1003,10 +1054,12 @@ app.get('/api/users/:id/rating', async (req, res) => {
 });
 
 // ===== Жалобы: Оставить =====
-app.post('/api/reports', async (req, res) => {
+app.post('/api/reports', requireAuth, async (req, res) => {
   try {
-    const { listing_id, reporter_id, reason } = req.body;
-    if (!listing_id || !reporter_id || !reason) {
+    const { listing_id, reason } = req.body;
+    const reporterId = req.userId;
+
+    if (!listing_id || !reason) {
       return res.status(400).json({ error: 'Заполните все поля' });
     }
 
@@ -1015,7 +1068,7 @@ app.post('/api/reports', async (req, res) => {
       .from('reports')
       .select('id')
       .eq('listing_id', listing_id)
-      .eq('reporter_id', reporter_id);
+      .eq('reporter_id', reporterId);
 
     if (existing && existing.length > 0) {
       return res.status(400).json({ error: 'Вы уже жаловались на это объявление' });
@@ -1023,7 +1076,7 @@ app.post('/api/reports', async (req, res) => {
 
     const { data, error } = await supabase
       .from('reports')
-      .insert([{ listing_id, reporter_id, reason }])
+      .insert([{ listing_id, reporter_id: reporterId, reason }])
       .select()
       .single();
 
@@ -1070,10 +1123,9 @@ app.post('/api/reports', async (req, res) => {
 });
 
 // ===== АДМИНКА: Получить все жалобы =====
-app.get('/api/admin/reports', async (req, res) => {
+app.get('/api/admin/reports', requireAuth, async (req, res) => {
   try {
-    const userId = req.query.user_id;
-    if (userId !== ADMIN_ID) {
+    if (req.userId !== ADMIN_ID) {
       return res.status(403).json({ error: 'Доступ запрещен. Вы не администратор.' });
     }
 
