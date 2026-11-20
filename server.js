@@ -478,7 +478,7 @@ app.get('/api/admin/ads', requireAuth, async (req, res) => {
   }
 });
 
-// 2. Создать новый баннер (с загрузкой фото из галереи)
+// 2. Создать новый баннер (с загрузкой в Supabase Storage)
 app.post('/api/admin/ads', requireAuth, async (req, res) => {
   try {
     if (!(await checkIsAdmin(req.userId))) {
@@ -513,15 +513,9 @@ app.post('/api/admin/ads', requireAuth, async (req, res) => {
         });
 
       if (uploadError) {
+        console.error('Ошибка загрузки в Storage:', uploadError);
         return res.status(500).json({ error: `Ошибка Storage: ${uploadError.message}` });
       }
-
-      const { data: publicUrlData } = supabase.storage
-        .from('ads')
-        .getPublicUrl(fileName);
-
-      finalImageUrl = publicUrlData.publicUrl;
-    }
 
       const { data: publicUrlData } = supabase.storage
         .from('ads')
@@ -555,7 +549,6 @@ app.post('/api/admin/ads', requireAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
 // 3. Включить / выключить баннер
 app.put('/api/admin/ads/:id', requireAuth, async (req, res) => {
   try {
