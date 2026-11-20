@@ -358,6 +358,53 @@ app.post('/api/users/save-token', requireAuth, async (req, res) => {
   }
 });
 
+// ===== Универсальная отправка Push-уведомлений =====
+async function sendPushNotification(targetUserId, title, body, dataPayload = {}) {
+  try {
+    if (!admin.apps.length) return;
+
+    const { data: targetUser } = await supabase
+      .from('users')
+      .select('fcm_token')
+      .eq('id', targetUserId)
+      .single();
+
+    if (!targetUser || !targetUser.fcm_token) return;
+
+    // Все значения в data должны быть строками
+    const stringData = {};
+    for (const [key, val] of Object.entries(dataPayload)) {
+      if (val !== null && val !== undefined) {
+        stringData[key] = String(val);
+      }
+    }
+
+    await admin.messaging().send({
+      token: targetUser.fcm_token,
+      notification: { title, body },
+      data: stringData,
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'high_importance_channel',
+          sound: 'default',
+        },
+      },
+    });
+
+    console.log(`✅ Пуш отправлен пользователю ${targetUserId}`);
+  } catch (err) {
+    console.log('❌ Ошибка отправки пуша:', err.message);
+    // Если пользователь удалил приложение или токен устарел — очищаем его в базе
+    if (
+      err.code === 'messaging/registration-token-not-registered' ||
+      err.code === 'messaging/invalid-registration-token'
+    ) {
+      await supabase.from('users').update({ fcm_token: null }).eq('id', targetUserId);
+    }
+  }
+}
+
 // ===== Объявления: Получить список =====
 app.get('/api/listings', async (req, res) => {
   try {
@@ -769,7 +816,7 @@ app.post('/api/messages', requireAuth, async (req, res) => {
       console.log('❌ Ошибка отправки пуша:', pushError.message);
     }
 
-        // ===== СОЗДАЕМ УВЕДОМЛЕНИЕ В БАЗЕ =====
+        // ===== СОЗДАЕМ УВЕДОМЛЕНИЕ В БАЗЕ И ОТПРАВЛЯЕМ ПУШ =====
     try {
       const { data: sender } = await supabase
         .from('users')
@@ -779,7 +826,6 @@ app.post('/api/messages', requireAuth, async (req, res) => {
 
       const senderName = sender?.name || sender?.phone || 'Пользователь';
 
-      // Получаем данные объявления (если есть)
       let listingTitle = '';
       let listingPrice = '';
       if (listing_id) {
@@ -794,10 +840,16 @@ app.post('/api/messages', requireAuth, async (req, res) => {
         }
       }
 
+      const previewText = content
+        ? content
+        : audio_url
+          ? '🎤 Голосовое сообщение'
+          : '📷 Фотография';
+
       await supabase.from('notifications').insert([{
         user_id: otherUserId,
         title: 'Новое сообщение 💬',
-        subtitle: `${senderName}: ${content || 'Вложение'}`,
+        subtitle: `${senderName}: ${previewText}`,
         type: 'message',
         related_user_id: senderId,
         related_listing_id: listing_id,
@@ -806,9 +858,23 @@ app.post('/api/messages', requireAuth, async (req, res) => {
         related_listing_title: listingTitle,
         related_listing_price: listingPrice
       }]);
-      console.log(`✅ Уведомление создано для ${otherUserId}`);
+
+      await sendPushNotification(
+        otherUserId,
+        listingTitle ? `${senderName} • ${listingTitle}` : senderName,
+        previewText,
+        {
+          type: 'message',
+          otherUserId: senderId,
+          otherUserName: senderName,
+          otherUserAvatar: sender?.avatar_url || '',
+          listingId: listing_id || '',
+          listingTitle: listingTitle,
+          listingPrice: listingPrice,
+        }
+      );
     } catch (notifError) {
-      console.log('❌ Ошибка создания уведомления:', notifError.message);
+      console.log('❌ Ошибка уведомления/пуша:', notifError.message);
     }
     // =====================================
 
@@ -1090,41 +1156,27 @@ app.post('/api/reviews', requireAuth, async (req, res) => {
 
     if (error) throw error;
 
-    // ===== УВЕДОМЛЕНИЕ В БАЗУ (уже есть) =====
+    // ===== УВЕДОМЛЕНИЕ В БАЗУ =====
     try {
       await supabase.from('notifications').insert([{
         user_id: seller_id,
         title: 'Новый отзыв ⭐',
         subtitle: `Вам поставили ${rating} звезд(ы)`,
         type: 'review',
-        related_user_id: reviewerId // <-- ДОБАВИЛИ ID АВТОРА ОТЗЫВА
+        related_user_id: reviewerId
       }]);
       console.log(`✅ Уведомление об отзыве создано для ${seller_id}`);
     } catch (notifError) {
       console.log('❌ Ошибка создания уведомления:', notifError.message);
     }
 
-    // ===== ПУШ В ШТОРКУ (НОВЫЙ БЛОК) =====
-    try {
-      const { data: seller } = await supabase
-        .from('users')
-        .select('fcm_token')
-        .eq('id', seller_id)
-        .single();
-
-      if (seller && seller.fcm_token) {
-        await admin.messaging().send({
-          notification: {
-            title: 'Новый отзыв ⭐',
-            body: `Вам поставили ${rating} звезд(ы)`,
-          },
-          token: seller.fcm_token,
-        });
-        console.log('✅ Пуш об отзыве отправлен продавцу');
-      }
-    } catch (e) { console.log('Ошибка пуша:', e.message); }
-    // ===================================
-
+    // ===== ПУШ В ШТОРКУ =====
+    await sendPushNotification(
+      seller_id,
+      'Новый отзыв ⭐',
+      `Вам поставили ${rating} звезд(ы)`,
+      { type: 'review', userId: reviewerId }
+    );
     res.status(201).json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1178,39 +1230,26 @@ app.post('/api/reports', requireAuth, async (req, res) => {
 
     if (error) throw error;
 
-    // ===== УВЕДОМЛЕНИЕ В БАЗУ (уже есть) =====
+    // ===== УВЕДОМЛЕНИЕ В БАЗУ =====
     try {
       await supabase.from('notifications').insert([{
-        user_id: '5dac82e8-6c01-4f5e-865b-69d817a727cc',
+        user_id: ADMIN_ID,
         title: 'Новая жалоба ⚠️',
         subtitle: `Причина: ${reason}`,
         type: 'report'
       }]);
-      console.log(`✅ Уведомление о жалобе создано для админа`);
+      console.log('✅ Уведомление о жалобе создано для админа');
     } catch (notifError) {
       console.log('❌ Ошибка создания уведомления:', notifError.message);
     }
 
-    // ===== ПУШ В ШТОРКУ (НОВЫЙ БЛОК) =====
-    try {
-      const { data: admin } = await supabase
-        .from('users')
-        .select('fcm_token')
-        .eq('id', '5dac82e8-6c01-4f5e-865b-69d817a727cc')
-        .single();
-
-      if (admin && admin.fcm_token) {
-        await admin.messaging().send({
-          notification: {
-            title: 'Новая жалоба ⚠️',
-            body: `Причина: ${reason}`,
-          },
-          token: admin.fcm_token,
-        });
-        console.log('✅ Пуш о жалобе отправлен админу');
-      }
-    } catch (e) { console.log('Ошибка пуша:', e.message); }
-    // ===================================
+    // ===== ПУШ В ШТОРКУ =====
+    await sendPushNotification(
+      ADMIN_ID,
+      'Новая жалоба ⚠️',
+      `Причина: ${reason}`,
+      { type: 'report', listingId: listing_id }
+    );
 
     res.status(201).json(data);
   } catch (error) {
