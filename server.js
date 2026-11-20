@@ -501,9 +501,6 @@ app.post('/api/admin/ads', requireAuth, async (req, res) => {
     let finalImageUrl = null;
 
     if (image_base64) {
-      await supabase.storage.createBucket('ads', { public: true }).catch(() => {});
-
-      // Очищаем возможный префикс data:image/...;base64,
       const cleanBase64 = image_base64.replace(/^data:image\/\w+;base64,/, '');
       const buffer = Buffer.from(cleanBase64, 'base64');
       const fileName = `banner_${Date.now()}.jpg`;
@@ -516,9 +513,15 @@ app.post('/api/admin/ads', requireAuth, async (req, res) => {
         });
 
       if (uploadError) {
-        console.error('Ошибка загрузки в Storage:', uploadError);
         return res.status(500).json({ error: `Ошибка Storage: ${uploadError.message}` });
       }
+
+      const { data: publicUrlData } = supabase.storage
+        .from('ads')
+        .getPublicUrl(fileName);
+
+      finalImageUrl = publicUrlData.publicUrl;
+    }
 
       const { data: publicUrlData } = supabase.storage
         .from('ads')
@@ -1489,6 +1492,56 @@ app.use(bot.webhookCallback(webhookPath));
 // ===== Тестовый роут =====
 app.get('/', (req, res) => {
   res.send(' TradeTJ Backend & Telegram Bot are running!');
+});
+
+// ===== УДАЛЕНИЕ АККАУНТА (Требование Google Play) =====
+app.delete('/api/account', requireAuth, async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    // Удаляем связанные данные пользователя
+    await supabase.from('favorites').delete().eq('user_id', userId);
+    await supabase.from('blocked_users').delete().or(`blocker_id.eq.${userId},blocked_id.eq.${userId}`);
+    await supabase.from('messages').delete().or(`sender_id.eq.${userId},receiver_id.eq.${userId}`);
+    await supabase.from('listings').delete().eq('user_id', userId);
+
+    // Удаляем самого пользователя
+    const { error } = await supabase.from('users').delete().eq('id', userId);
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка удаления аккаунта:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Публичная страница для поля "Delete account URL" в Google Play Console
+app.get('/delete-account', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Удаление аккаунта — TradeTJ</title>
+      <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #222; }
+        h1 { color: #FF6B00; }
+      </style>
+    </head>
+    <body>
+      <h1>Удаление аккаунта в TradeTJ</h1>
+      <p>Вы можете полностью удалить свой аккаунт и все связанные с ним данные (объявления, сообщения, избранное) в любой момент:</p>
+      <ol>
+        <li>Откройте приложение <b>TradeTJ</b> на телефоне.</li>
+        <li>Перейдите во вкладку <b>Профиль</b>.</li>
+        <li>Нажмите кнопку <b>«Удалить аккаунт»</b> внизу экрана и подтвердите действие.</li>
+      </ol>
+      <p>Все данные удаляются безвозвратно сразу после подтверждения.</p>
+    </body>
+    </html>
+  `);
 });
 
 // ===== ЗАПУСК =====
