@@ -369,6 +369,7 @@ app.get('/api/listings', async (req, res) => {
   query = query.eq('is_sold', false);
 }
     if (req.query.category) query = query.eq('category', req.query.category);
+    if (req.query.city) query = query.eq('city', req.query.city);
     if (req.query.search) query = query.ilike('title', `%${req.query.search}%`);
     if (req.query.price_from) query = query.gte('price', req.query.price_from);
     if (req.query.price_to) query = query.lte('price', req.query.price_to);
@@ -808,7 +809,7 @@ app.get('/api/conversations/:userId', requireAuth, async (req, res) => {
 // ==========================================================
 // ===== НЕЙРОСЕТЬ (ИИ): Генерация описания ================
 // ==========================================================
-app.post('/api/ai/generate', async (req, res) => {
+app.post('/api/ai/generate', requireAuth, async (req, res) => {
   try {
     const { title, category, price } = req.body;
 
@@ -1151,22 +1152,7 @@ app.get('/', (req, res) => {
 
 // ===== ЗАПУСК =====
 const PORT = process.env.PORT || 3000;
-app.post('/api/test-push', async (req, res) => {
-  const { token } = req.body;
-  try {
-    const message = {
-      notification: {
-        title: 'Привет от TradeTJ!',
-        body: 'Это тестовое уведомление работает!',
-      },
-      token: token,
-    };
-    const response = await admin.messaging().send(message);
-    res.json({ success: true, response });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+
 app.listen(PORT, () => {
   console.log(`🚀 Сервер запущен на порту ${PORT}`);
   console.log(` Telegram webhook: ${webhookPath}`);
