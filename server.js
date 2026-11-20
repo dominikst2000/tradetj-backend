@@ -478,7 +478,7 @@ app.get('/api/admin/ads', requireAuth, async (req, res) => {
   }
 });
 
-// 2. Создать новый баннер
+// 2. Создать новый баннер (с загрузкой фото из галереи)
 app.post('/api/admin/ads', requireAuth, async (req, res) => {
   try {
     if (!(await checkIsAdmin(req.userId))) {
@@ -488,28 +488,49 @@ app.post('/api/admin/ads', requireAuth, async (req, res) => {
     const {
       title,
       subtitle,
-      image_url,
+      image_base64,
       target_category,
       target_url,
-      color_start,
-      color_end,
       sort_order,
     } = req.body;
 
-    if (!title || !title.trim()) {
-      return res.status(400).json({ error: 'Заголовок баннера обязателен' });
+    if (!image_base64 && (!title || !title.trim())) {
+      return res.status(400).json({ error: 'Выберите фото баннера или введите заголовок' });
+    }
+
+    let finalImageUrl = null;
+
+    if (image_base64) {
+      // Создаём бакет 'ads', если его ещё нет
+      await supabase.storage.createBucket('ads', { public: true }).catch(() => {});
+
+      const buffer = Buffer.from(image_base64, 'base64');
+      const fileName = `banner_${Date.now()}.jpg`;
+
+      const { error: uploadError } = await supabase.storage
+        .from('ads')
+        .upload(fileName, buffer, {
+          contentType: 'image/jpeg',
+          upsert: true,
+        });
+
+      if (uploadError) throw uploadError;
+
+      const { data: publicUrlData } = supabase.storage
+        .from('ads')
+        .getPublicUrl(fileName);
+
+      finalImageUrl = publicUrlData.publicUrl;
     }
 
     const { data, error } = await supabase
       .from('ads')
       .insert([{
-        title: title.trim(),
+        title: title?.trim() || '',
         subtitle: subtitle?.trim() || null,
-        image_url: image_url?.trim() || null,
+        image_url: finalImageUrl,
         target_category: target_category?.trim() || null,
         target_url: target_url?.trim() || null,
-        color_start: color_start?.trim() || '#667eea',
-        color_end: color_end?.trim() || '#764ba2',
         sort_order: Number(sort_order) || 0,
         is_active: true,
       }])
