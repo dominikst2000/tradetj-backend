@@ -1014,36 +1014,6 @@ app.post('/api/messages', requireAuth, async (req, res) => {
     }]).select().single();
     if (error) throw error;
 
-    // ===== ОТПРАВЛЯЕМ ПУШ ПОЛУЧАТЕЛЮ =====
-    try {
-      const { data: receiver } = await supabase
-        .from('users')
-        .select('fcm_token')
-        .eq('id', otherUserId)
-        .single();
-
-      if (receiver && receiver.fcm_token) {
-        const messagePush = {
-          notification: {
-            title: 'Новое сообщение TradeTJ 💬',
-            body: content ? content : 'Вам отправили вложение',
-          },
-          android: {
-            priority: 'high',
-            notification: {
-              channelId: 'high_importance_channel',
-              sound: 'default',
-            },
-          },
-          token: receiver.fcm_token,
-        };
-        await admin.messaging().send(messagePush);
-        console.log(`✅ Пуш отправлен пользователю ${otherUserId}`);
-      }
-    } catch (pushError) {
-      console.log('❌ Ошибка отправки пуша:', pushError.message);
-    }
-
         // ===== СОЗДАЕМ УВЕДОМЛЕНИЕ В БАЗЕ И ОТПРАВЛЯЕМ ПУШ =====
     try {
       const { data: sender } = await supabase
