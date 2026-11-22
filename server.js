@@ -142,7 +142,7 @@ bot.on('contact', async (ctx) => {
   }
 });
 
-// ===== SMS / ЗВОНОК: Отправка 6-значного кода через SMSC.ru =====
+// ===== SMS: Отправка 6-значного кода по SMS через SMSC.ru =====
 app.post('/api/send-sms', async (req, res) => {
   try {
     const { phone } = req.body;
@@ -157,25 +157,21 @@ app.post('/api/send-sms', async (req, res) => {
       cleanPhone = '7' + cleanPhone.slice(1);
     }
 
-    // Если номер российский (+7) — робот звонит и голосом диктует 6-значный код
+    // Если номер российский (+7) — отправляем обычную СМС через SMSC.ru
     if (cleanPhone.startsWith('7') && cleanPhone.length === 11) {
       const login = process.env.SMSC_LOGIN;
       const psw = process.env.SMSC_PASSWORD;
 
       if (!login || !psw) {
-        return res.status(500).json({ error: 'Сервис звонков не настроен на сервере' });
+        return res.status(500).json({ error: 'SMS-сервис не настроен на сервере' });
       }
-
-      // Разделяем цифры пробелами, чтобы робот чётко произнёс каждую цифру
-      const spokenCode = code.split('').join(' ');
 
       const params = new URLSearchParams({
         login: login,
         psw: psw,
         phones: cleanPhone,
-        mes: `Трейд Ти Джей. Ваш код входа: ${spokenCode}. Повторяю: ${spokenCode}`,
-        call: '1', // Голосовой звонок с диктовкой 6 цифр
-        fmt: '3'   // Ответ в формате JSON
+        mes: `TradeTJ: ваш код подтверждения ${code}`,
+        fmt: '3' // Ответ в формате JSON
       });
 
       const smsResponse = await fetch(`https://smsc.ru/sys/send.php?${params.toString()}`);
@@ -184,7 +180,7 @@ app.post('/api/send-sms', async (req, res) => {
       if (smsData.error) {
         console.error('Ошибка SMSC.ru:', JSON.stringify(smsData));
         return res.status(500).json({
-          error: 'Не удалось совершить звонок. Попробуйте вход через Telegram.'
+          error: 'Не удалось отправить SMS. Попробуйте вход через Telegram.'
         });
       }
     }
@@ -198,7 +194,7 @@ app.post('/api/send-sms', async (req, res) => {
 
     if (dbError) throw dbError;
 
-    console.log(`📞 Код (6 цифр) для ${phone}: ${code}`);
+    console.log(`📱 SMS код (6 цифр) для ${phone}: ${code}`);
     res.json({ success: true });
   } catch (error) {
     console.error('Ошибка /api/send-sms:', error);
