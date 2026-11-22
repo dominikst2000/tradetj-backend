@@ -150,30 +150,6 @@ app.post('/api/send-sms', async (req, res) => {
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
-    
-    await supabase.from('sms_codes').insert({
-      phone: phone,
-      code: code,
-      expires_at: expiresAt
-    });
-    
-    console.log(`📱 SMS код для ${phone}: ${code}`);
-    
-    // Убрали testCode из ответа! Теперь код виден только в логах сервера.
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ===== SMS: Отправка кода =====
-app.post('/api/send-sms', async (req, res) => {
-  try {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
     // Очищаем номер для проверки страны
     let cleanPhone = phone.replace(/\D/g, '');
