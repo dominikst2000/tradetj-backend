@@ -166,48 +166,52 @@ app.post('/api/send-sms', async (req, res) => {
   }
 });
 
-// ===== SMS: Проверка кода =====
-app.post('/api/verify-code', async (req, res) => {
+// ===== SMS: Отправка кода =====
+app.post('/api/send-sms', async (req, res) => {
   try {
-    const { phone, code } = req.body;
-    if (!phone || !code) return res.status(400).json({ error: 'Телефон и код обязательны' });
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ error: 'Телефон обязателен' });
 
-    // Ищем по телефону и коду, без привязки к времени в SQL
-    const { data: codes, error: codeError } = await supabase
-      .from('sms_codes')
-      .select('*')
-      .eq('phone', phone)
-      .eq('code', code)
-      .order('created_at', { ascending: false })
-      .limit(1);
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000).toISOString();
 
-    if (codeError || !codes || codes.length === 0) {
-      return res.status(400).json({ error: 'Неверный код' });
+    // Очищаем номер для проверки страны
+    let cleanPhone = phone.replace(/\D/g, '');
+    if (cleanPhone.length === 11 && cleanPhone.startsWith('8')) {
+      cleanPhone = '7' + cleanPhone.slice(1);
     }
 
-    const storedCode = codes[0];
+    // Если номер российский (+7) — отправляем реальную SMS через SMS.ru
+    if (cleanPhone.startsWith('7') && cleanPhone.length === 11) {
+      if (!process.env.SMS_RU_API_KEY) {
+        return res.status(500).json({ error: 'SMS-сервис не настроен на сервере' });
+      }
 
-    // Проверяем, не использован ли он
-    if (storedCode.used === true) {
-      return res.status(400).json({ error: 'Этот код уже был использован' });
+      const msg = encodeURIComponent(`TradeTJ: ваш код входа ${code}`);
+      const smsUrl = `https://sms.ru/sms/send?api_id=${process.env.SMS_RU_API_KEY}&to=${cleanPhone}&msg=${msg}&json=1`;
+
+      const smsResponse = await fetch(smsUrl);
+      const smsData = await smsResponse.json();
+
+      if (smsData.status !== 'OK' || smsData.sms?.[cleanPhone]?.status !== 'OK') {
+        console.error('Ошибка SMS.ru:', JSON.stringify(smsData));
+        return res.status(500).json({ error: 'Не удалось отправить SMS. Попробуйте вход через Telegram.' });
+      }
     }
 
-    // Проверяем время истечения на стороне JS (защита от часовых поясов)
-    const expiresAt = new Date(storedCode.expires_at);
-    if (expiresAt < new Date()) {
-      return res.status(400).json({ error: 'Код истёк. Запросите новый.' });
-    }
+    // Сохраняем код в Supabase для любой страны (чтобы сработал /api/verify-code)
+    const { error: dbError } = await supabase.from('sms_codes').insert({
+      phone: phone,
+      code: code,
+      expires_at: expiresAt
+    });
 
-    let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
-    if (!user) {
-      const { data: newUser } = await supabase.from('users').insert([{ phone }]).select().single();
-      user = newUser;
-    }
+    if (dbError) throw dbError;
 
-    await supabase.from('sms_codes').update({ used: true }).eq('id', storedCode.id);
-    const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '24h' });
-    res.json({ success: true, user: { id: user.id, phone: user.phone }, token });
+    console.log(`📱 SMS код для ${phone}: ${code}`);
+    res.json({ success: true });
   } catch (error) {
+    console.error('Ошибка /api/send-sms:', error);
     res.status(500).json({ error: error.message });
   }
 });
