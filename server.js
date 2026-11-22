@@ -202,6 +202,70 @@ app.post('/api/send-sms', async (req, res) => {
   }
 });
 
+// ===== SMS: Проверка 6-значного кода =====
+app.post('/api/verify-code', async (req, res) => {
+  try {
+    const { phone, code } = req.body;
+    if (!phone || !code) {
+      return res.status(400).json({ error: 'Телефон и код обязательны' });
+    }
+
+    // Защита от подбора кода
+    const attempts = failedAttempts.get(phone) || { count: 0, lastAttempt: 0 };
+    const now = Date.now();
+    if (now - attempts.lastAttempt < 10 * 60 * 1000 && attempts.count >= 5) {
+      return res.status(429).json({
+        error: 'Слишком много попыток. Попробуйте через 10 минут или запросите новый код.'
+      });
+    }
+
+    // Ищем последний отправленный код для этого номера в Supabase
+    const { data: codes, error: codeError } = await supabase
+      .from('sms_codes')
+      .select('*')
+      .eq('phone', phone)
+      .eq('code', code.trim())
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    if (codeError || !codes || codes.length === 0) {
+      attempts.count++;
+      attempts.lastAttempt = now;
+      failedAttempts.set(phone, attempts);
+      return res.status(400).json({ error: 'Неверный код' });
+    }
+
+    const storedCode = codes[0];
+
+    // Проверяем срок действия кода (10 минут)
+    if (new Date(storedCode.expires_at) < new Date()) {
+      return res.status(400).json({ error: 'Код истёк. Запросите новый.' });
+    }
+
+    // Ищем пользователя в базе или создаём нового, если он впервые
+    let { data: user } = await supabase.from('users').select('*').eq('phone', phone).single();
+    if (!user) {
+      const { data: newUser, error: createError } = await supabase
+        .from('users')
+        .insert([{ phone }])
+        .select()
+        .single();
+      if (createError) throw createError;
+      user = newUser;
+    }
+
+    // Удаляем использованные коды для этого номера, чтобы их нельзя было ввести повторно
+    await supabase.from('sms_codes').delete().eq('phone', phone);
+    failedAttempts.delete(phone);
+
+    const token = jwt.sign({ sub: user.id }, JWT_SECRET, { expiresIn: '24h' });
+    res.json({ success: true, user: { id: user.id, phone: user.phone }, token });
+  } catch (error) {
+    console.error('Ошибка /api/verify-code:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== TELEGRAM: Проверка кода (с защитой от brute-force) =====
 app.post('/api/verify-telegram-code', async (req, res) => {
   try {
